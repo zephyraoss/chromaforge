@@ -1,0 +1,36 @@
+#cloud-config
+package_update: true
+packages:
+  - rsync
+  - curl
+
+runcmd:
+  - |
+    curl -fsSL \
+      https://github.com/zephyraoss/chromaforge/releases/latest/download/chromaforge-linux-amd64 \
+      -o /usr/local/bin/chromaforge
+    chmod +x /usr/local/bin/chromaforge
+
+  - lsblk -o NAME,SIZE,TYPE,MOUNTPOINT >> /var/log/chromaforge-disks.log
+
+  - |
+    DISK=$(lsblk -rno NAME,TYPE | awk '$2=="disk" && $1 ~ /^sd/ {print $1}' | tail -1)
+    if ! blkid /dev/$DISK; then
+      mkfs.ext4 /dev/$DISK
+    fi
+    mkdir -p /mnt/disk
+    mount /dev/$DISK /mnt/disk
+
+  - |
+    mkfs.ext4 /dev/nvme0n1 || true
+    mkdir -p /mnt/nvme
+    mount /dev/nvme0n1 /mnt/nvme || true
+
+  - |
+    chromaforge build \
+      --db /mnt/nvme/chromakopia.db \
+      --output /mnt/disk/chromakopia.db \
+      --workers 16 \
+      --decode-workers 16 \
+      --self-deallocate \
+      >> /var/log/chromaforge-build.log 2>&1
