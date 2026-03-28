@@ -2,6 +2,7 @@ package build
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log"
@@ -325,7 +326,7 @@ func defaultHTTPClient(downloadWorkers int) *http.Client {
 				Timeout:   30 * time.Second,
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
-			ForceAttemptHTTP2:     true,
+			ForceAttemptHTTP2:     false,
 			MaxIdleConns:          maxIdleConns,
 			MaxIdleConnsPerHost:   maxIdleConnsPerHost,
 			MaxConnsPerHost:       maxConnsPerHost,
@@ -333,6 +334,7 @@ func defaultHTTPClient(downloadWorkers int) *http.Client {
 			TLSHandshakeTimeout:   10 * time.Second,
 			ResponseHeaderTimeout: 30 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
+			TLSNextProto:          map[string]func(string, *tls.Conn) http.RoundTripper{},
 		},
 	}
 }
