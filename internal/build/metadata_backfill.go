@@ -1,6 +1,7 @@
 package build
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,7 +44,7 @@ type metadataReplayState struct {
 	trackMeta              map[int64]trackMeta
 	trackMBID              map[int64]string
 	fingerprintTrack       map[int64]int64
-	targetAcoustIDs        map[string]struct{}
+	targetAcoustIDs        *compactAcoustIDSet
 	unresolvedFingerprints map[int64]struct{}
 }
 
@@ -104,9 +106,15 @@ WHERE acoustid IN (SELECT acoustid FROM temp.candidate_metadata)
 )
 
 const (
-	metadataRawLineBuffer = 20000
-	metadataRecordBuffer  = 20000
+	metadataRawLineBuffer       = 20000
+	metadataRecordBuffer        = 20000
+	metadataTargetProgressEvery = 1_000_000
 )
+
+type compactAcoustIDSet struct {
+	uuids  [][16]byte
+	extras map[string]struct{}
+}
 
 func RunMetadataBackfill(ctx context.Context, cfg MetadataBackfillConfig) error {
 	start := time.Now()
@@ -158,11 +166,11 @@ func RunMetadataBackfill(ctx context.Context, cfg MetadataBackfillConfig) error 
 	if err != nil {
 		return err
 	}
-	if len(targetAcoustIDs) == 0 {
+	if targetAcoustIDs.Len() == 0 {
 		log.Printf("metadata backfill skipped: no fingerprints have missing metadata")
 		return nil
 	}
-	log.Printf("metadata backfill target_acoustids=%d", len(targetAcoustIDs))
+	log.Printf("metadata backfill target_acoustids=%d", targetAcoustIDs.Len())
 
 	progress, hasProgress, err := loadMetadataBackfillProgress(cfg.DBPath)
 	if err != nil {
@@ -263,7 +271,7 @@ func RunMetadataBackfill(ctx context.Context, cfg MetadataBackfillConfig) error 
 	return nil
 }
 
-func newMetadataReplayState(targetAcoustIDs map[string]struct{}) *metadataReplayState {
+func newMetadataReplayState(targetAcoustIDs *compactAcoustIDSet) *metadataReplayState {
 	return &metadataReplayState{
 		trackGID:               map[int64]string{},
 		trackMeta:              map[int64]trackMeta{},
@@ -274,7 +282,7 @@ func newMetadataReplayState(targetAcoustIDs map[string]struct{}) *metadataReplay
 	}
 }
 
-func loadIncompleteMetadataAcoustIDs(ctx context.Context, db *sql.DB) (map[string]struct{}, error) {
+func loadIncompleteMetadataAcoustIDs(ctx context.Context, db *sql.DB) (*compactAcoustIDSet, error) {
 	rows, err := db.QueryContext(ctx, `
 SELECT acoustid
 FROM fingerprints
@@ -289,17 +297,33 @@ WHERE
 	}
 	defer rows.Close()
 
-	out := make(map[string]struct{})
+	out := &compactAcoustIDSet{
+		uuids:  make([][16]byte, 0, 1024),
+		extras: make(map[string]struct{}),
+	}
+	var count int64
 	for rows.Next() {
 		var acoustid string
 		if err := rows.Scan(&acoustid); err != nil {
 			return nil, err
 		}
-		out[acoustid] = struct{}{}
+		if id, ok := parseUUIDString(acoustid); ok {
+			out.uuids = append(out.uuids, id)
+		} else {
+			out.extras[acoustid] = struct{}{}
+		}
+		count++
+		if count%metadataTargetProgressEvery == 0 {
+			log.Printf("metadata backfill target load loaded=%d", count)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	sort.Slice(out.uuids, func(i, j int) bool {
+		return compareUUID(out.uuids[i], out.uuids[j]) < 0
+	})
+	log.Printf("metadata backfill target load completed total=%d parsed_uuids=%d extras=%d", count, len(out.uuids), len(out.extras))
 	return out, nil
 }
 
@@ -348,7 +372,7 @@ func (s *metadataReplayState) ApplyTrack(v dump.TrackUpdate) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.targetAcoustIDs[v.GID]; !ok {
+	if !s.targetAcoustIDs.Contains(v.GID) {
 		return
 	}
 	if _, ok := s.trackGID[v.ID]; !ok {
@@ -725,4 +749,74 @@ func mergeMetadataRecord(dst, src Record) Record {
 		dst.Duration = src.Duration
 	}
 	return dst
+}
+
+func (s *compactAcoustIDSet) Contains(acoustid string) bool {
+	if s == nil {
+		return false
+	}
+	if id, ok := parseUUIDString(acoustid); ok {
+		idx := sort.Search(len(s.uuids), func(i int) bool {
+			return compareUUID(s.uuids[i], id) >= 0
+		})
+		return idx < len(s.uuids) && s.uuids[idx] == id
+	}
+	_, ok := s.extras[acoustid]
+	return ok
+}
+
+func (s *compactAcoustIDSet) Len() int {
+	if s == nil {
+		return 0
+	}
+	return len(s.uuids) + len(s.extras)
+}
+
+func parseUUIDString(s string) ([16]byte, bool) {
+	var out [16]byte
+	if len(s) != 36 {
+		return out, false
+	}
+
+	j := 0
+	for i := 0; i < len(s); {
+		switch i {
+		case 8, 13, 18, 23:
+			if s[i] != '-' {
+				return out, false
+			}
+			i++
+			continue
+		}
+
+		if i+1 >= len(s) || j >= len(out) {
+			return out, false
+		}
+		hi := fromHex(s[i])
+		lo := fromHex(s[i+1])
+		if hi < 0 || lo < 0 {
+			return out, false
+		}
+		out[j] = byte((hi << 4) | lo)
+		j++
+		i += 2
+	}
+	return out, j == len(out)
+}
+
+func compareUUID(a, b [16]byte) int {
+	return bytes.Compare(a[:], b[:])
+}
+
+func fromHex(b byte) int {
+	switch {
+	case b >= '0' && b <= '9':
+		return int(b - '0')
+	case b >= 'a' && b <= 'f':
+		return int(b-'a') + 10
+	case b >= 'A' && b <= 'F':
+		return int(b-'A') + 10
+	default:
+		return -1
+	}
 }

@@ -36,8 +36,7 @@ type Result struct {
 
 type Candidate struct {
 	AcoustID string
-	Title    string
-	Artist   string
+	MBID     string
 	Duration int
 	Delta    int
 	Hits     int64
@@ -190,8 +189,7 @@ best AS (
 )
 SELECT
 	f.acoustid,
-	COALESCE(f.title, ''),
-	COALESCE(f.artist, ''),
+	COALESCE(f.mb_id, ''),
 	COALESCE(f.duration, 0),
 	b.delta,
 	b.hits
@@ -214,7 +212,7 @@ LIMIT ?
 	candidates := make([]Candidate, 0, limit)
 	for rows.Next() {
 		var candidate Candidate
-		if err := rows.Scan(&candidate.AcoustID, &candidate.Title, &candidate.Artist, &candidate.Duration, &candidate.Delta, &candidate.Hits); err != nil {
+		if err := rows.Scan(&candidate.AcoustID, &candidate.MBID, &candidate.Duration, &candidate.Delta, &candidate.Hits); err != nil {
 			return nil, err
 		}
 		candidate.Coverage = (float64(candidate.Hits) / float64(querySubFingerprintCount)) * 100

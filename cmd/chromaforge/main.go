@@ -251,17 +251,16 @@ func newMatchCmd() *cobra.Command {
 			}
 
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(tw, "RANK\tHITS\tCOVERAGE\tDELTA\tDURATION\tACOUSTID\tARTIST\tTITLE")
+			fmt.Fprintln(tw, "RANK\tHITS\tCOVERAGE\tDELTA\tDURATION\tACOUSTID\tMBID")
 			for i, candidate := range result.Candidates {
-				fmt.Fprintf(tw, "%d\t%d\t%.1f%%\t%d\t%d\t%s\t%s\t%s\n",
+				fmt.Fprintf(tw, "%d\t%d\t%.1f%%\t%d\t%d\t%s\t%s\n",
 					i+1,
 					candidate.Hits,
 					candidate.Coverage,
 					candidate.Delta,
 					candidate.Duration,
 					candidate.AcoustID,
-					candidate.Artist,
-					candidate.Title,
+					candidate.MBID,
 				)
 			}
 			return tw.Flush()

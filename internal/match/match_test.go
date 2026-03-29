@@ -82,6 +82,9 @@ func TestRunDBWithFingerprintReturnsBestCandidate(t *testing.T) {
 	if got := result.Candidates[0].AcoustID; got != "acoustid-1" {
 		t.Fatalf("best acoustid = %q, want acoustid-1", got)
 	}
+	if got := result.Candidates[0].MBID; got != "mbid-1" {
+		t.Fatalf("best mbid = %q, want mbid-1", got)
+	}
 	if got := result.Candidates[0].Hits; got != 3 {
 		t.Fatalf("best hits = %d, want 3", got)
 	}
