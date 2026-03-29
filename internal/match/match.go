@@ -72,7 +72,7 @@ func RunDBWithFingerprint(ctx context.Context, db *sql.DB, cfg Config, rawFinger
 		cfg.Limit = 10
 	}
 
-	normalized, err := dump.NormalizeFingerprint(rawFingerprint)
+	normalized, err := normalizeQueryFingerprint(rawFingerprint)
 	if err != nil {
 		return Result{}, err
 	}
@@ -301,6 +301,23 @@ func execConnPragma(ctx context.Context, conn *sql.Conn, stmt string) error {
 	for rows.Next() {
 	}
 	return rows.Err()
+}
+
+func normalizeQueryFingerprint(raw []int64) ([]uint32, error) {
+	const maxUint32 = int64(^uint32(0))
+
+	out := make([]uint32, 0, len(raw))
+	for _, v := range raw {
+		switch {
+		case v >= math.MinInt32 && v <= math.MaxInt32:
+			out = append(out, uint32(int32(v)))
+		case v >= 0 && v <= maxUint32:
+			out = append(out, uint32(v))
+		default:
+			return nil, fmt.Errorf("fingerprint value %d outside int32/uint32 range", v)
+		}
+	}
+	return out, nil
 }
 
 func min(a, b int) int {
