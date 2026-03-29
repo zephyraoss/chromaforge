@@ -33,11 +33,19 @@ Incremental updates are handled by Chromakopia, not this repository.
 - Supports `--full-integrity-check` when you want the slowest full `PRAGMA integrity_check`
 - Supports `--count-rows` when you want exact `COUNT(*)` scans instead of the fast default
 
+`chromaforge backfill-metadata`
+
+- Replays archive metadata into an existing database without rebuilding `sub_fingerprints`
+- Fills missing `mb_id`, `title`, `artist`, and `duration` values in place
+- Uses a separate resume file beside `--db` so interrupted backfills can continue later
+- Leaves existing fingerprint hashes and indexes intact
+
 `chromaforge match`
 
 - Accepts a raw Chromaprint fingerprint with `--fingerprint` or `--fingerprint-file`
 - Accepts `fpcalc -raw` output directly, including `DURATION=...`
 - Uses the same sampled sub-fingerprint hashing the builder stored in SQLite
+- Applies a small duration filter by default when query duration is known
 - Returns the top local candidate matches ranked by aligned hash hits
 
 `chromaforge version`
@@ -121,6 +129,13 @@ chromaforge validate \
   --timeout 0
 ```
 
+## Metadata Backfill
+
+```bash
+chromaforge backfill-metadata \
+  --db /mnt/disk/chromakopia.db
+```
+
 ## Matching
 
 Raw fingerprint example:
@@ -137,6 +152,15 @@ chromaforge match \
 fpcalc -raw song.mp3 | chromaforge match \
   --db /mnt/disk/chromakopia.db \
   --fingerprint-file -
+```
+
+Disable duration filtering:
+
+```bash
+fpcalc -raw song.mp3 | chromaforge match \
+  --db /mnt/disk/chromakopia.db \
+  --fingerprint-file - \
+  --duration-window 0
 ```
 
 ## Azure Build VM
@@ -166,6 +190,7 @@ docker build -t chromaforge:latest .
 - The final database contains only `fingerprints` and `sub_fingerprints`, plus `idx_hash`.
 - Build-time replay state is held outside the final schema.
 - The implementation accepts `track_meta-update` files in the public archive because those records carry joinable track metadata for `title` and `artist`.
+- Metadata backfill and duplicate-acoustid ingest only fill missing metadata fields; they do not overwrite existing non-empty values.
 
 ## License
 

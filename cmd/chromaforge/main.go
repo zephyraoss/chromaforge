@@ -33,7 +33,7 @@ func main() {
 		SilenceErrors: true,
 	}
 
-	root.AddCommand(newBuildCmd(), newValidateCmd(), newMatchCmd(), newVersionCmd())
+	root.AddCommand(newBuildCmd(), newBackfillMetadataCmd(), newValidateCmd(), newMatchCmd(), newVersionCmd())
 
 	if err := root.Execute(); err != nil {
 		log.Printf("error: %v", err)
@@ -158,9 +158,70 @@ func newValidateCmd() *cobra.Command {
 	return cmd
 }
 
+func newBackfillMetadataCmd() *cobra.Command {
+	cfg := build.MetadataBackfillConfig{
+		DBPath:          "/mnt/nvme/chromakopia.db",
+		CacheDir:        "",
+		BaseURL:         "https://data.acoustid.org",
+		GoMaxProcs:      0,
+		DownloadWorkers: 4,
+		SoftHeapLimit:   -1,
+	}
+
+	cmd := &cobra.Command{
+		Use:   "backfill-metadata",
+		Short: "Replay archive metadata into an existing database without rebuilding fingerprints",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := context.WithCancel(cmd.Context())
+			defer cancel()
+
+			stopCh := make(chan struct{})
+			sigCh := make(chan os.Signal, 2)
+			signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+			defer signal.Stop(sigCh)
+
+			go func() {
+				stopping := false
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case sig := <-sigCh:
+						if !stopping {
+							stopping = true
+							log.Printf("received %s, stopping after the current day and saving metadata backfill progress; press Ctrl+C again to abort immediately", sig)
+							close(stopCh)
+							continue
+						}
+						log.Printf("received %s again, aborting immediately", sig)
+						cancel()
+						return
+					}
+				}
+			}()
+
+			cfg.GracefulStop = stopCh
+			return build.RunMetadataBackfill(ctx, cfg)
+		},
+	}
+
+	cmd.Flags().StringVar(&cfg.DBPath, "db", cfg.DBPath, "Existing database path to update in place")
+	cmd.Flags().StringVar(&cfg.CacheDir, "cache-dir", cfg.CacheDir, "Directory for downloaded archive files (defaults to a cache directory beside --db)")
+	cmd.Flags().IntVar(&cfg.GoMaxProcs, "gomaxprocs", cfg.GoMaxProcs, "Go scheduler CPU parallelism (defaults to runtime auto-detect)")
+	cmd.Flags().IntVar(&cfg.StartYear, "start-year", cfg.StartYear, "Replay archive from this year (defaults to earliest available)")
+	cmd.Flags().StringVar(&cfg.EndDate, "end-date", cfg.EndDate, "Replay archive through this date (YYYY-MM-DD, defaults to latest available)")
+	cmd.Flags().IntVar(&cfg.DownloadWorkers, "download-workers", cfg.DownloadWorkers, "Background archive download workers")
+	cmd.Flags().Int64Var(&cfg.SoftHeapLimit, "soft-heap-limit", cfg.SoftHeapLimit, "SQLite soft heap limit in bytes; use 0 to disable, negative to leave unchanged")
+	_ = cmd.Flags().MarkHidden("start-year")
+	_ = cmd.Flags().MarkHidden("end-date")
+
+	return cmd
+}
+
 func newMatchCmd() *cobra.Command {
 	cfg := match.Config{
 		DBPath:          "/mnt/disk/chromakopia.db",
+		DurationWindow:  0,
 		Limit:           10,
 		MinHits:         0,
 		SoftHeapLimit:   -1,
@@ -209,6 +270,7 @@ func newMatchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cfg.Fingerprint, "fingerprint", cfg.Fingerprint, "Raw Chromaprint fingerprint values as a comma-separated list")
 	cmd.Flags().StringVar(&cfg.FingerprintFile, "fingerprint-file", cfg.FingerprintFile, "Path to a file containing raw fingerprint values or fpcalc -raw output; use - for stdin")
 	cmd.Flags().IntVar(&cfg.Duration, "duration", cfg.Duration, "Query duration in seconds; overrides any DURATION= value from --fingerprint-file")
+	cmd.Flags().IntVar(&cfg.DurationWindow, "duration-window", cfg.DurationWindow, "Duration tolerance in seconds; 0 auto-selects a small default when duration is known, negative is invalid")
 	cmd.Flags().IntVar(&cfg.Limit, "limit", cfg.Limit, "Maximum matches to return")
 	cmd.Flags().IntVar(&cfg.MinHits, "min-hits", cfg.MinHits, "Minimum aligned sub-fingerprint hits required; 0 auto-selects a small threshold")
 	cmd.Flags().IntVar(&cfg.ReadConnections, "read-conns", cfg.ReadConnections, "SQLite read connections for matching")

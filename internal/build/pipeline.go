@@ -60,8 +60,15 @@ func (s *ReplayState) ApplyTrackMeta(v dump.TrackMetaUpdate) {
 		return
 	}
 	s.mu.Lock()
-	if _, ok := s.trackMeta[v.TrackID]; !ok {
-		s.trackMeta[v.TrackID] = trackMeta{title: v.Track, artist: v.Artist}
+	current := s.trackMeta[v.TrackID]
+	if current.title == "" && v.Track != "" {
+		current.title = v.Track
+	}
+	if current.artist == "" && v.Artist != "" {
+		current.artist = v.Artist
+	}
+	if current.title != "" || current.artist != "" {
+		s.trackMeta[v.TrackID] = current
 	}
 	s.mu.Unlock()
 }
@@ -71,7 +78,7 @@ func (s *ReplayState) ApplyTrackMBID(v dump.TrackMBIDUpdate) {
 		return
 	}
 	s.mu.Lock()
-	if _, ok := s.trackMBID[v.TrackID]; !ok {
+	if s.trackMBID[v.TrackID] == "" {
 		s.trackMBID[v.TrackID] = v.MBID
 	}
 	s.mu.Unlock()

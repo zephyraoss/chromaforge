@@ -133,3 +133,62 @@ func TestRunDBWithWrappedUint32FingerprintReturnsBestCandidate(t *testing.T) {
 		t.Fatalf("best acoustid = %q, want acoustid-1", got)
 	}
 }
+
+func TestRunDBWithFingerprintFiltersByDurationWindow(t *testing.T) {
+	db, err := libsqlutil.OpenLocal(filepath.Join(t.TempDir(), "chromakopia.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, schema.CreateFingerprintsTable); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, schema.CreateSubFingerprintsTable); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO fingerprints (id, acoustid, mb_id, title, artist, duration) VALUES
+		(1, 'wrong-duration', 'mbid-1', 'Wrong Duration', 'Artist One', 381),
+		(2, 'right-duration', 'mbid-2', 'Right Duration', 'Artist Two', 350)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO sub_fingerprints (hash, fingerprint_id, position) VALUES
+		(11, 1, 0),
+		(22, 1, 8),
+		(33, 1, 16),
+		(44, 1, 24),
+		(55, 1, 32),
+		(66, 1, 40),
+		(77, 1, 48),
+		(88, 1, 56),
+		(99, 1, 64),
+		(11, 2, 0),
+		(22, 2, 8),
+		(33, 2, 16)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, schema.CreateAcoustIDIndex); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, schema.CreateHashIndex); err != nil {
+		t.Fatal(err)
+	}
+
+	rawFingerprint := []int64{
+		11, 1, 1, 1, 1, 1, 1, 1,
+		22, 1, 1, 1, 1, 1, 1, 1,
+		33, 1, 1, 1, 1, 1, 1, 1,
+	}
+
+	result, err := RunDBWithFingerprint(ctx, db, Config{Limit: 5, DurationWindow: 5}, rawFingerprint, 350)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Candidates) != 1 {
+		t.Fatalf("candidate count = %d, want 1", len(result.Candidates))
+	}
+	if got := result.Candidates[0].AcoustID; got != "right-duration" {
+		t.Fatalf("best acoustid = %q, want right-duration", got)
+	}
+}

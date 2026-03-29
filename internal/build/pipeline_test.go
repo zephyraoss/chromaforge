@@ -29,6 +29,20 @@ func TestReplayStateFirstSeenWins(t *testing.T) {
 	}
 }
 
+func TestReplayStateFillsMissingMetadataFromLaterUpdates(t *testing.T) {
+	state := NewReplayState()
+	state.ApplyTrack(dump.TrackUpdate{ID: 10, GID: "gid-1"})
+	state.ApplyTrackMeta(dump.TrackMetaUpdate{TrackID: 10, Track: "", Artist: ""})
+	state.ApplyTrackMeta(dump.TrackMetaUpdate{TrackID: 10, Track: "title-1", Artist: "artist-1"})
+	state.ApplyTrackMBID(dump.TrackMBIDUpdate{TrackID: 10, MBID: "mbid-1"})
+	state.ApplyTrackFingerprint(dump.TrackFingerprintUpdate{FingerprintID: 99, TrackID: 10})
+
+	acoustID, mbid, title, artist, ok := state.ResolveFingerprint(99)
+	if !ok || acoustID != "gid-1" || mbid != "mbid-1" || title != "title-1" || artist != "artist-1" {
+		t.Fatalf("unexpected resolution: ok=%t acoustid=%q mbid=%q title=%q artist=%q", ok, acoustID, mbid, title, artist)
+	}
+}
+
 func TestValidateBadRecordRate(t *testing.T) {
 	stats := &Stats{start: time.Now()}
 	stats.processed.Store(1000)

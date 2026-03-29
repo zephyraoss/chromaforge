@@ -41,15 +41,17 @@ type SubFP struct {
 }
 
 type writeSession struct {
-	conn     *sql.Conn
-	seenStmt *sql.Stmt
+	conn       *sql.Conn
+	seenStmt   *sql.Stmt
+	updateStmt *sql.Stmt
 }
 
 type batchWriter struct {
-	conn      *sql.Conn
-	seenStmt  *sql.Stmt
-	fpStmt    *sql.Stmt
-	committed bool
+	conn       *sql.Conn
+	seenStmt   *sql.Stmt
+	updateStmt *sql.Stmt
+	fpStmt     *sql.Stmt
+	committed  bool
 }
 
 func newWriteSession(ctx context.Context, db *sql.DB) (*writeSession, error) {
@@ -75,10 +77,17 @@ func newWriteSession(ctx context.Context, db *sql.DB) (*writeSession, error) {
 		_ = conn.Close()
 		return nil, err
 	}
+	updateStmt, err := conn.PrepareContext(ctx, metadataMergeUpdateSQL)
+	if err != nil {
+		_ = seenStmt.Close()
+		_ = conn.Close()
+		return nil, err
+	}
 
 	return &writeSession{
-		conn:     conn,
-		seenStmt: seenStmt,
+		conn:       conn,
+		seenStmt:   seenStmt,
+		updateStmt: updateStmt,
 	}, nil
 }
 
@@ -97,9 +106,10 @@ VALUES (?, ?, ?, ?, ?)
 	}
 
 	return &batchWriter{
-		conn:     s.conn,
-		seenStmt: s.seenStmt,
-		fpStmt:   fpStmt,
+		conn:       s.conn,
+		seenStmt:   s.seenStmt,
+		updateStmt: s.updateStmt,
+		fpStmt:     fpStmt,
 	}, nil
 }
 
@@ -107,6 +117,11 @@ func (s *writeSession) Close() error {
 	var firstErr error
 	if s.seenStmt != nil {
 		if err := s.seenStmt.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if s.updateStmt != nil {
+		if err := s.updateStmt.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -131,6 +146,9 @@ func (w *batchWriter) InsertBatch(ctx context.Context, batch []Record) (int64, i
 			return insertedFPs, insertedSubs, err
 		}
 		if seenRows == 0 {
+			if _, err := w.updateStmt.ExecContext(ctx, metadataMergeArgs(r)...); err != nil {
+				return insertedFPs, insertedSubs, err
+			}
 			continue
 		}
 		res, err := w.fpStmt.ExecContext(ctx, r.AcoustID, nullIfEmpty(r.MBID), nullIfEmpty(r.Title), nullIfEmpty(r.Artist), r.Duration)

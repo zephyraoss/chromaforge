@@ -21,6 +21,7 @@ type Config struct {
 	Fingerprint     string
 	FingerprintFile string
 	Duration        int
+	DurationWindow  int
 	Limit           int
 	MinHits         int
 	SoftHeapLimit   int64
@@ -92,6 +93,12 @@ func RunDBWithFingerprint(ctx context.Context, db *sql.DB, cfg Config, rawFinger
 	if cfg.Duration > 0 {
 		queryDuration = cfg.Duration
 	}
+	if cfg.DurationWindow < 0 {
+		return Result{}, fmt.Errorf("duration window must be >= 0, got %d", cfg.DurationWindow)
+	}
+	if queryDuration > 0 && cfg.DurationWindow == 0 {
+		cfg.DurationWindow = 5
+	}
 
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -106,7 +113,7 @@ func RunDBWithFingerprint(ctx context.Context, db *sql.DB, cfg Config, rawFinger
 		_, _ = conn.ExecContext(context.Background(), `DROP TABLE IF EXISTS temp.query_sub_fingerprints`)
 	}()
 
-	candidates, err := queryCandidates(ctx, conn, queryDuration, len(subFingerprints), cfg.MinHits, cfg.Limit)
+	candidates, err := queryCandidates(ctx, conn, queryDuration, cfg.DurationWindow, len(subFingerprints), cfg.MinHits, cfg.Limit)
 	if err != nil {
 		return Result{}, err
 	}
@@ -148,7 +155,13 @@ CREATE TEMP TABLE temp.query_sub_fingerprints (
 	return nil
 }
 
-func queryCandidates(ctx context.Context, conn *sql.Conn, queryDuration int, querySubFingerprintCount int, minHits int, limit int) ([]Candidate, error) {
+func queryCandidates(ctx context.Context, conn *sql.Conn, queryDuration int, durationWindow int, querySubFingerprintCount int, minHits int, limit int) ([]Candidate, error) {
+	minDuration := queryDuration - durationWindow
+	if minDuration < 0 {
+		minDuration = 0
+	}
+	maxDuration := queryDuration + durationWindow
+
 	rows, err := conn.QueryContext(ctx, `
 WITH grouped AS (
 	SELECT
@@ -184,13 +197,15 @@ SELECT
 	b.hits
 FROM best b
 JOIN fingerprints f ON f.id = b.fingerprint_id
+WHERE
+	? <= 0 OR ? <= 0 OR COALESCE(f.duration, 0) BETWEEN ? AND ?
 ORDER BY
 	b.hits DESC,
 	CASE WHEN ? > 0 THEN ABS(COALESCE(f.duration, 0) - ?) ELSE 0 END ASC,
 	ABS(b.delta) ASC,
 	f.id ASC
 LIMIT ?
-`, minHits, queryDuration, queryDuration, limit)
+`, minHits, queryDuration, durationWindow, minDuration, maxDuration, queryDuration, queryDuration, limit)
 	if err != nil {
 		return nil, err
 	}
