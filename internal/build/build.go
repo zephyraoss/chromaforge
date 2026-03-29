@@ -157,90 +157,91 @@ func Run(ctx context.Context, cfg Config) error {
 	log.Printf("archive discovery completed: %d days", len(days))
 
 	state := NewReplayState()
-	startIdx := 0
-	if resumeFromDay != "" {
-		cutoff, err := time.Parse("2006-01-02", resumeFromDay)
-		if err != nil {
-			return err
-		}
-		dl := downloader{client: cfg.HTTPClient}
-		for i, day := range days {
-			if day.Day.After(cutoff) {
-				startIdx = i
-				break
-			}
-			startIdx = i + 1
-			log.Printf("resume state rebuild day=%s", day.Day.Format("2006-01-02"))
-			if err := ReplayStateDay(ctx, dl, cfg, day, state); err != nil {
-				return err
-			}
-		}
-		log.Printf("resume ready remaining_days=%d", len(days)-startIdx)
+	startIdx, hasResume, err := findReplayStartIndex(days, resumeFromDay)
+	if err != nil {
+		return err
 	}
-
+	if hasResume {
+		if startIdx == len(days) {
+			log.Printf("resume detected all archive days already completed; skipping state rebuild")
+		} else {
+			dl := downloader{client: cfg.HTTPClient}
+			for i := 0; i < startIdx; i++ {
+				day := days[i]
+				log.Printf("resume state rebuild day=%s", day.Day.Format("2006-01-02"))
+				if err := ReplayStateDay(ctx, dl, cfg, day, state); err != nil {
+					return err
+				}
+			}
+			log.Printf("resume ready remaining_days=%d", len(days)-startIdx)
+		}
+	}
+	remainingDays := days[startIdx:]
 	var totalEstimate int64
-	for _, day := range days[startIdx:] {
+	for _, day := range remainingDays {
 		if file, ok := day.Files[dump.FileTypeFingerprint]; ok {
 			totalEstimate += max(1, file.Size/100)
 		}
 	}
 
 	stats := &Stats{start: start}
-	dl := downloader{client: cfg.HTTPClient}
-	writeSession, err := newWriteSession(ctx, db)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if writeSession != nil {
-			if err := writeSession.Close(); err != nil {
-				log.Printf("writer session close warning: %v", err)
+	if len(remainingDays) > 0 {
+		dl := downloader{client: cfg.HTTPClient}
+		writeSession, err := newWriteSession(ctx, db)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if writeSession != nil {
+				if err := writeSession.Close(); err != nil {
+					log.Printf("writer session close warning: %v", err)
+				}
+			}
+		}()
+		prefetchCtx, cancelPrefetch := context.WithCancel(ctx)
+		pdl := newPrefetchDownloader(prefetchCtx, dl, cfg.DownloadWorkers)
+		defer func() {
+			cancelPrefetch()
+			pdl.Close()
+		}()
+
+		log.Printf("download prefetch window_days=%d workers=%d", prefetchWindowDays, cfg.DownloadWorkers)
+		initialPrefetch := prefetchWindowDays + 1
+		if initialPrefetch > len(remainingDays) {
+			initialPrefetch = len(remainingDays)
+		}
+		for i := 1; i < initialPrefetch; i++ {
+			pdl.PrefetchDay(remainingDays[i], cfg.CacheDir)
+		}
+
+		for i, day := range remainingDays {
+			next := i + prefetchWindowDays + 1
+			if next < len(remainingDays) {
+				pdl.PrefetchDay(remainingDays[next], cfg.CacheDir)
+			}
+
+			log.Printf("replaying day %s", day.Day.Format("2006-01-02"))
+			if err := ReplayDay(ctx, writeSession, pdl, cfg, day, state, stats, mode, totalEstimate); err != nil {
+				return err
+			}
+			if err := saveBuildProgress(cfg.DBPath, day.Day); err != nil {
+				return err
+			}
+			if stopRequested(cfg.GracefulStop) {
+				log.Printf("graceful stop completed at day=%s rerun the same build command to resume", day.Day.Format("2006-01-02"))
+				return nil
 			}
 		}
-	}()
-	prefetchCtx, cancelPrefetch := context.WithCancel(ctx)
-	pdl := newPrefetchDownloader(prefetchCtx, dl, cfg.DownloadWorkers)
-	defer func() {
-		cancelPrefetch()
-		pdl.Close()
-	}()
 
-	log.Printf("download prefetch window_days=%d workers=%d", prefetchWindowDays, cfg.DownloadWorkers)
-	initialPrefetch := prefetchWindowDays + 1
-	remainingDays := days[startIdx:]
-	if initialPrefetch > len(remainingDays) {
-		initialPrefetch = len(remainingDays)
-	}
-	for i := 1; i < initialPrefetch; i++ {
-		pdl.PrefetchDay(remainingDays[i], cfg.CacheDir)
-	}
-
-	for i, day := range remainingDays {
-		next := i + prefetchWindowDays + 1
-		if next < len(remainingDays) {
-			pdl.PrefetchDay(remainingDays[next], cfg.CacheDir)
-		}
-
-		log.Printf("replaying day %s", day.Day.Format("2006-01-02"))
-		if err := ReplayDay(ctx, writeSession, pdl, cfg, day, state, stats, mode, totalEstimate); err != nil {
+		if err := validateBadRecordRate(stats); err != nil {
 			return err
 		}
-		if err := saveBuildProgress(cfg.DBPath, day.Day); err != nil {
+		if err := writeSession.Close(); err != nil {
 			return err
 		}
-		if stopRequested(cfg.GracefulStop) {
-			log.Printf("graceful stop completed at day=%s rerun the same build command to resume", day.Day.Format("2006-01-02"))
-			return nil
-		}
+	} else {
+		log.Printf("resume skipping replay: no remaining archive days")
 	}
-
-	if err := validateBadRecordRate(stats); err != nil {
-		return err
-	}
-	if err := writeSession.Close(); err != nil {
-		return err
-	}
-	writeSession = nil
 
 	log.Printf("index build started")
 	indexStart := time.Now()
@@ -301,6 +302,24 @@ func Run(ctx context.Context, cfg Config) error {
 		time.Since(start).Round(time.Second),
 	)
 	return nil
+}
+
+func findReplayStartIndex(days []dump.DayFiles, resumeFromDay string) (int, bool, error) {
+	if resumeFromDay == "" {
+		return 0, false, nil
+	}
+
+	cutoff, err := time.Parse("2006-01-02", resumeFromDay)
+	if err != nil {
+		return 0, false, err
+	}
+
+	for i, day := range days {
+		if day.Day.After(cutoff) {
+			return i, true, nil
+		}
+	}
+	return len(days), true, nil
 }
 
 func stopRequested(ch <-chan struct{}) bool {
