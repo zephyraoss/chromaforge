@@ -7,11 +7,13 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/zephyraoss/chromaforge/internal/build"
+	"github.com/zephyraoss/chromaforge/internal/match"
 	"github.com/zephyraoss/chromaforge/internal/validate"
 )
 
@@ -31,7 +33,7 @@ func main() {
 		SilenceErrors: true,
 	}
 
-	root.AddCommand(newBuildCmd(), newValidateCmd(), newVersionCmd())
+	root.AddCommand(newBuildCmd(), newValidateCmd(), newMatchCmd(), newVersionCmd())
 
 	if err := root.Execute(); err != nil {
 		log.Printf("error: %v", err)
@@ -152,6 +154,64 @@ func newValidateCmd() *cobra.Command {
 	cmd.Flags().IntVar(&cfg.SampleCount, "sample-count", cfg.SampleCount, "Sample lookups per table")
 	cmd.Flags().IntVar(&cfg.ReadConnections, "read-conns", cfg.ReadConnections, "SQLite read connections for standalone validation")
 	cmd.Flags().DurationVar(&timeout, "timeout", 0, "Validation timeout; 0 disables the timeout")
+	cmd.Flags().Int64Var(&cfg.SoftHeapLimit, "soft-heap-limit", cfg.SoftHeapLimit, "SQLite soft heap limit in bytes; use 0 to disable, negative to leave unchanged")
+	return cmd
+}
+
+func newMatchCmd() *cobra.Command {
+	cfg := match.Config{
+		DBPath:          "/mnt/disk/chromakopia.db",
+		Limit:           10,
+		MinHits:         0,
+		SoftHeapLimit:   -1,
+		ReadConnections: 1,
+	}
+
+	cmd := &cobra.Command{
+		Use:   "match",
+		Short: "Match a Chromaprint fingerprint against the local database",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := match.Run(cmd.Context(), cfg)
+			if err != nil {
+				return err
+			}
+
+			out := cmd.OutOrStdout()
+			if result.QueryDuration > 0 {
+				fmt.Fprintf(out, "query_duration=%d query_sub_fingerprints=%d\n", result.QueryDuration, result.QuerySubFingerprintCount)
+			} else {
+				fmt.Fprintf(out, "query_sub_fingerprints=%d\n", result.QuerySubFingerprintCount)
+			}
+			if len(result.Candidates) == 0 {
+				fmt.Fprintln(out, "no matches found")
+				return nil
+			}
+
+			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(tw, "RANK\tHITS\tCOVERAGE\tDELTA\tDURATION\tACOUSTID\tARTIST\tTITLE")
+			for i, candidate := range result.Candidates {
+				fmt.Fprintf(tw, "%d\t%d\t%.1f%%\t%d\t%d\t%s\t%s\t%s\n",
+					i+1,
+					candidate.Hits,
+					candidate.Coverage,
+					candidate.Delta,
+					candidate.Duration,
+					candidate.AcoustID,
+					candidate.Artist,
+					candidate.Title,
+				)
+			}
+			return tw.Flush()
+		},
+	}
+
+	cmd.Flags().StringVar(&cfg.DBPath, "db", cfg.DBPath, "Database to query")
+	cmd.Flags().StringVar(&cfg.Fingerprint, "fingerprint", cfg.Fingerprint, "Raw Chromaprint fingerprint values as a comma-separated list")
+	cmd.Flags().StringVar(&cfg.FingerprintFile, "fingerprint-file", cfg.FingerprintFile, "Path to a file containing raw fingerprint values or fpcalc -raw output; use - for stdin")
+	cmd.Flags().IntVar(&cfg.Duration, "duration", cfg.Duration, "Query duration in seconds; overrides any DURATION= value from --fingerprint-file")
+	cmd.Flags().IntVar(&cfg.Limit, "limit", cfg.Limit, "Maximum matches to return")
+	cmd.Flags().IntVar(&cfg.MinHits, "min-hits", cfg.MinHits, "Minimum aligned sub-fingerprint hits required; 0 auto-selects a small threshold")
+	cmd.Flags().IntVar(&cfg.ReadConnections, "read-conns", cfg.ReadConnections, "SQLite read connections for matching")
 	cmd.Flags().Int64Var(&cfg.SoftHeapLimit, "soft-heap-limit", cfg.SoftHeapLimit, "SQLite soft heap limit in bytes; use 0 to disable, negative to leave unchanged")
 	return cmd
 }

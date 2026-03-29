@@ -33,6 +33,13 @@ Incremental updates are handled by Chromakopia, not this repository.
 - Supports `--full-integrity-check` when you want the slowest full `PRAGMA integrity_check`
 - Supports `--count-rows` when you want exact `COUNT(*)` scans instead of the fast default
 
+`chromaforge match`
+
+- Accepts a raw Chromaprint fingerprint with `--fingerprint` or `--fingerprint-file`
+- Accepts `fpcalc -raw` output directly, including `DURATION=...`
+- Uses the same sampled sub-fingerprint hashing the builder stored in SQLite
+- Returns the top local candidate matches ranked by aligned hash hits
+
 `chromaforge version`
 
 - Prints version metadata injected at build time
@@ -112,6 +119,24 @@ chromaforge validate \
   --full-integrity-check \
   --count-rows \
   --timeout 0
+```
+
+## Matching
+
+Raw fingerprint example:
+
+```bash
+chromaforge match \
+  --db /mnt/disk/chromakopia.db \
+  --fingerprint '123,456,789,101112'
+```
+
+`fpcalc -raw` example:
+
+```bash
+fpcalc -raw song.mp3 | chromaforge match \
+  --db /mnt/disk/chromakopia.db \
+  --fingerprint-file -
 ```
 
 ## Azure Build VM

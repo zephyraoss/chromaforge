@@ -3,6 +3,7 @@ package build
 import (
 	"context"
 	"crypto/tls"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -251,21 +252,34 @@ func Run(ctx context.Context, cfg Config) error {
 		log.Printf("resume skipping replay: no remaining archive days")
 	}
 
-	log.Printf("index build started")
-	indexStart := time.Now()
-	if err := ApplyIndexPragmas(ctx, db, cfg.Workers, cfg.IndexCacheSizeBytes, cfg.IndexMmapSizeBytes); err != nil {
+	indexReady, analyzeReady, err := indexStageStatus(ctx, db)
+	if err != nil {
 		return err
 	}
-	if _, err := db.ExecContext(ctx, schema.CreateAcoustIDIndex); err != nil {
-		return err
+	switch {
+	case indexReady && analyzeReady:
+		log.Printf("index build skipped: indexes and sqlite_stat1 already present")
+	default:
+		log.Printf("index build started")
+		indexStart := time.Now()
+		if err := ApplyIndexPragmas(ctx, db, cfg.Workers, cfg.IndexCacheSizeBytes, cfg.IndexMmapSizeBytes); err != nil {
+			return err
+		}
+		if !indexReady {
+			if _, err := db.ExecContext(ctx, schema.CreateAcoustIDIndex); err != nil {
+				return err
+			}
+			if _, err := db.ExecContext(ctx, schema.CreateHashIndex); err != nil {
+				return err
+			}
+		} else {
+			log.Printf("index build resume: indexes already present, skipping CREATE INDEX")
+		}
+		if _, err := db.ExecContext(ctx, schema.AnalyzeSQL); err != nil {
+			return err
+		}
+		log.Printf("index build completed elapsed=%s", time.Since(indexStart).Round(time.Second))
 	}
-	if _, err := db.ExecContext(ctx, schema.CreateHashIndex); err != nil {
-		return err
-	}
-	if _, err := db.ExecContext(ctx, schema.AnalyzeSQL); err != nil {
-		return err
-	}
-	log.Printf("index build completed elapsed=%s", time.Since(indexStart).Round(time.Second))
 
 	if err := ApplyFinalizePragmas(ctx, db); err != nil {
 		return err
@@ -353,6 +367,63 @@ func max(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+func indexStageStatus(ctx context.Context, db *sql.DB) (bool, bool, error) {
+	acoustidIndexExists, err := sqliteObjectExists(ctx, db, "index", "idx_fingerprints_acoustid")
+	if err != nil {
+		return false, false, err
+	}
+	hashIndexExists, err := sqliteObjectExists(ctx, db, "index", "idx_hash")
+	if err != nil {
+		return false, false, err
+	}
+	indexReady := acoustidIndexExists && hashIndexExists
+	if !indexReady {
+		return false, false, nil
+	}
+
+	statsTableExists, err := sqliteObjectExists(ctx, db, "table", "sqlite_stat1")
+	if err != nil {
+		return false, false, err
+	}
+	if !statsTableExists {
+		return true, false, nil
+	}
+
+	acoustidStatsReady, err := sqliteStatExists(ctx, db, "idx_fingerprints_acoustid")
+	if err != nil {
+		return false, false, err
+	}
+	hashStatsReady, err := sqliteStatExists(ctx, db, "idx_hash")
+	if err != nil {
+		return false, false, err
+	}
+	return true, acoustidStatsReady && hashStatsReady, nil
+}
+
+func sqliteObjectExists(ctx context.Context, db *sql.DB, objectType, name string) (bool, error) {
+	var present int
+	err := db.QueryRowContext(ctx, `SELECT 1 FROM sqlite_master WHERE type = ? AND name = ? LIMIT 1`, objectType, name).Scan(&present)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func sqliteStatExists(ctx context.Context, db *sql.DB, indexName string) (bool, error) {
+	var present int
+	err := db.QueryRowContext(ctx, `SELECT 1 FROM sqlite_stat1 WHERE idx = ? LIMIT 1`, indexName).Scan(&present)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func defaultHTTPClient(downloadWorkers int) *http.Client {
