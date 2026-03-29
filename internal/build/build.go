@@ -30,6 +30,7 @@ type Config struct {
 	StartYear           int
 	EndDate             string
 	CacheDir            string
+	TempDir             string
 	BaseURL             string
 	GoMaxProcs          int
 	SoftHeapLimit       int64
@@ -38,6 +39,7 @@ type Config struct {
 	IndexCacheSizeBytes int64
 	IndexMmapSizeBytes  int64
 	DownloadWorkers     int
+	SkipValidate        bool
 	HTTPClient          *http.Client
 	GracefulStop        <-chan struct{}
 }
@@ -89,13 +91,19 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.CacheDir == "" {
 		cfg.CacheDir = filepath.Join(filepath.Dir(cfg.DBPath), ".chromaforge-cache")
 	}
+	if cfg.TempDir == "" {
+		cfg.TempDir = filepath.Join(cfg.CacheDir, "sqlite-temp")
+	}
 
-	log.Printf("build started db=%s output=%s cache_dir=%s gomaxprocs=%d workers=%d decode_workers=%d batch_size=%d cache_size=%d mmap_size=%d index_cache_size=%d index_mmap_size=%d", cfg.DBPath, cfg.OutputPath, cfg.CacheDir, effectiveGoMaxProcs, cfg.Workers, cfg.DecodeWorkers, cfg.BatchSize, cfg.CacheSizeBytes, cfg.MmapSizeBytes, cfg.IndexCacheSizeBytes, cfg.IndexMmapSizeBytes)
+	log.Printf("build started db=%s output=%s cache_dir=%s temp_dir=%s gomaxprocs=%d workers=%d decode_workers=%d batch_size=%d cache_size=%d mmap_size=%d index_cache_size=%d index_mmap_size=%d", cfg.DBPath, cfg.OutputPath, cfg.CacheDir, cfg.TempDir, effectiveGoMaxProcs, cfg.Workers, cfg.DecodeWorkers, cfg.BatchSize, cfg.CacheSizeBytes, cfg.MmapSizeBytes, cfg.IndexCacheSizeBytes, cfg.IndexMmapSizeBytes)
 
 	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o755); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(cfg.CacheDir, 0o755); err != nil {
+		return err
+	}
+	if err := configureProcessTempDir(cfg.TempDir); err != nil {
 		return err
 	}
 
@@ -262,13 +270,19 @@ func Run(ctx context.Context, cfg Config) error {
 	if err := ApplyFinalizePragmas(ctx, db); err != nil {
 		return err
 	}
+	if cfg.SkipValidate {
+		log.Printf("validate skipped: --skip-validate enabled")
+	} else {
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
 
-	log.Printf("validate started")
-	result, err := validate.RunDB(ctx, db)
-	if err != nil {
-		return err
+		log.Printf("validate started")
+		result, err := validate.RunDB(ctx, db)
+		if err != nil {
+			return err
+		}
+		log.Printf("validate completed ok=%t fingerprints=%d sub_fingerprints=%d", result.OK, result.FingerprintCount, result.SubFingerprintCount)
 	}
-	log.Printf("validate completed ok=%t fingerprints=%d sub_fingerprints=%d", result.OK, result.FingerprintCount, result.SubFingerprintCount)
 
 	if err := CheckpointWAL(ctx, db); err != nil {
 		return err
@@ -378,6 +392,13 @@ func maxInt(a, b int) int {
 	return b
 }
 
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func cleanupBuildArtifacts(dbPath string) {
 	for _, suffix := range []string{"", "-wal", "-log", "-shm", "-journal"} {
 		path := dbPath + suffix
@@ -388,4 +409,19 @@ func cleanupBuildArtifacts(dbPath string) {
 			log.Printf("removed stale build artifact: %s", path)
 		}
 	}
+}
+
+func configureProcessTempDir(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	for _, key := range []string{"SQLITE_TMPDIR", "TMPDIR", "TMP", "TEMP"} {
+		if err := os.Setenv(key, dir); err != nil {
+			return err
+		}
+	}
+	return nil
 }

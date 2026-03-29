@@ -11,6 +11,7 @@ Incremental updates are handled by Chromakopia, not this repository.
 - Replays the AcoustID daily JSON update archive from `https://data.acoustid.org/`
 - Builds a fresh SQLite database with the libSQL driver
 - Uses a local cache directory beside `--db` unless `--cache-dir` is set
+- Places SQLite temp files under the cache path by default; `--temp-dir` overrides it
 - Prefetches upcoming AcoustID archive files in background download workers while replay/index work is running
 - `--download-workers` controls that background download concurrency
 - `--gomaxprocs`, `--decode-workers`, and `--workers` let you tune CPU/core usage explicitly
@@ -19,15 +20,18 @@ Incremental updates are handled by Chromakopia, not this repository.
 - Supports `--soft-heap-limit` to cap SQLite heap usage for the process
 - Uses unsafe bulk-load mode with journaling disabled during replay/index builds, then finalizes the database back to WAL
 - Defers the final `acoustid` unique index and `idx_hash` until bulk inserts complete
-- Runs validation
+- Supports `--skip-validate` so build completion is not blocked on validation
 - Optionally `rsync`s the final `.db` to the configured output path
 - Optionally triggers Azure VM self-deallocation
 
 `chromaforge validate`
 
-- Verifies row counts
-- Performs random acoustid and hash spot checks
-- Runs `PRAGMA integrity_check`
+- Verifies the final tables and indexes exist
+- Performs sampled acoustid and hash spot checks without `ORDER BY RANDOM()`
+- Skips `PRAGMA quick_check` by default for speed
+- Supports `--quick-check` when you want the slower SQLite consistency pass
+- Supports `--full-integrity-check` when you want the slowest full `PRAGMA integrity_check`
+- Supports `--count-rows` when you want exact `COUNT(*)` scans instead of the fast default
 
 `chromaforge version`
 
@@ -54,6 +58,7 @@ chromaforge build \
   --db /mnt/nvme/chromakopia.db \
   --gomaxprocs 12 \
   --download-workers 12 \
+  --temp-dir /mnt/nvme/.chromaforge-tmp \
   --cache-size 4294967296 \
   --mmap-size 4294967296 \
   --index-cache-size 2147483648 \
@@ -61,6 +66,7 @@ chromaforge build \
   --workers 16 \
   --decode-workers 16 \
   --batch-size 500 \
+  --skip-validate \
   --soft-heap-limit 2147483648
 ```
 
@@ -72,6 +78,7 @@ chromaforge build \
   --output /mnt/disk/chromakopia.db \
   --gomaxprocs 12 \
   --download-workers 12 \
+  --temp-dir /mnt/nvme/.chromaforge-tmp \
   --cache-size 4294967296 \
   --mmap-size 4294967296 \
   --index-cache-size 2147483648 \
@@ -87,6 +94,24 @@ chromaforge build \
 
 ```bash
 chromaforge validate --db /mnt/disk/chromakopia.db
+```
+
+Quick check example:
+
+```bash
+chromaforge validate \
+  --db /mnt/disk/chromakopia.db \
+  --quick-check
+```
+
+Full validation example:
+
+```bash
+chromaforge validate \
+  --db /mnt/disk/chromakopia.db \
+  --full-integrity-check \
+  --count-rows \
+  --timeout 0
 ```
 
 ## Azure Build VM

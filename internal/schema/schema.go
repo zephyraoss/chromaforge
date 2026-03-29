@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS sub_fingerprints (
 	    position       INTEGER NOT NULL
 );`
 
-	CreateAcoustIDIndex = `CREATE UNIQUE INDEX idx_fingerprints_acoustid ON fingerprints(acoustid);`
-	CreateHashIndex     = `CREATE INDEX idx_hash ON sub_fingerprints(hash);`
+	CreateAcoustIDIndex = `CREATE UNIQUE INDEX IF NOT EXISTS idx_fingerprints_acoustid ON fingerprints(acoustid);`
+	CreateHashIndex     = `CREATE INDEX IF NOT EXISTS idx_hash ON sub_fingerprints(hash);`
 	AnalyzeSQL          = `ANALYZE;`
 )

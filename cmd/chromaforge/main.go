@@ -47,6 +47,7 @@ func newBuildCmd() *cobra.Command {
 		DecodeWorkers:       0,
 		BatchSize:           500,
 		CacheDir:            "",
+		TempDir:             "",
 		BaseURL:             "https://data.acoustid.org",
 		GoMaxProcs:          0,
 		SoftHeapLimit:       -1,
@@ -55,6 +56,7 @@ func newBuildCmd() *cobra.Command {
 		IndexCacheSizeBytes: 0,
 		IndexMmapSizeBytes:  0,
 		DownloadWorkers:     4,
+		SkipValidate:        false,
 	}
 
 	cmd := &cobra.Command{
@@ -104,11 +106,13 @@ func newBuildCmd() *cobra.Command {
 	cmd.Flags().IntVar(&cfg.StartYear, "start-year", 0, "Replay archive from this year (defaults to earliest available)")
 	cmd.Flags().StringVar(&cfg.EndDate, "end-date", "", "Replay archive through this date (YYYY-MM-DD, defaults to latest available)")
 	cmd.Flags().StringVar(&cfg.CacheDir, "cache-dir", cfg.CacheDir, "Directory for downloaded archive files (defaults to a cache directory beside --db)")
+	cmd.Flags().StringVar(&cfg.TempDir, "temp-dir", cfg.TempDir, "Directory for SQLite temp files during index build (defaults under --cache-dir)")
 	cmd.Flags().IntVar(&cfg.DownloadWorkers, "download-workers", cfg.DownloadWorkers, "Background archive download workers")
 	cmd.Flags().Int64Var(&cfg.CacheSizeBytes, "cache-size", cfg.CacheSizeBytes, "SQLite replay/write page cache target in bytes; 0 keeps the phase default")
 	cmd.Flags().Int64Var(&cfg.MmapSizeBytes, "mmap-size", cfg.MmapSizeBytes, "SQLite replay/write mmap_size in bytes; 0 keeps the phase default")
 	cmd.Flags().Int64Var(&cfg.IndexCacheSizeBytes, "index-cache-size", cfg.IndexCacheSizeBytes, "SQLite index-build page cache target in bytes; 0 keeps the phase default")
 	cmd.Flags().Int64Var(&cfg.IndexMmapSizeBytes, "index-mmap-size", cfg.IndexMmapSizeBytes, "SQLite index-build mmap_size in bytes; 0 keeps the phase default")
+	cmd.Flags().BoolVar(&cfg.SkipValidate, "skip-validate", cfg.SkipValidate, "Skip post-build validation so it can be run later with the validate command")
 	cmd.Flags().Int64Var(&cfg.SoftHeapLimit, "soft-heap-limit", cfg.SoftHeapLimit, "SQLite soft heap limit in bytes; use 0 to disable, negative to leave unchanged")
 	_ = cmd.Flags().MarkHidden("start-year")
 	_ = cmd.Flags().MarkHidden("end-date")
@@ -118,16 +122,23 @@ func newBuildCmd() *cobra.Command {
 
 func newValidateCmd() *cobra.Command {
 	cfg := validate.Config{
-		DBPath:        "/mnt/disk/chromakopia.db",
-		SoftHeapLimit: -1,
+		DBPath:          "/mnt/disk/chromakopia.db",
+		SoftHeapLimit:   -1,
+		SampleCount:     5,
+		ReadConnections: 1,
 	}
+	var timeout time.Duration
 
 	cmd := &cobra.Command{
 		Use:   "validate",
 		Short: "Validate the fingerprint database",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Minute)
-			defer cancel()
+			ctx := cmd.Context()
+			if timeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, timeout)
+				defer cancel()
+			}
 
 			_, err := validate.Run(ctx, cfg)
 			return err
@@ -135,6 +146,12 @@ func newValidateCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&cfg.DBPath, "db", cfg.DBPath, "Database to validate")
+	cmd.Flags().BoolVar(&cfg.QuickCheck, "quick-check", cfg.QuickCheck, "Run PRAGMA quick_check after the fast validation pass")
+	cmd.Flags().BoolVar(&cfg.FullIntegrityCheck, "full-integrity-check", cfg.FullIntegrityCheck, "Run the slower full PRAGMA integrity_check instead of quick_check")
+	cmd.Flags().BoolVar(&cfg.CountRows, "count-rows", cfg.CountRows, "Run exact COUNT(*) scans for fingerprints and sub_fingerprints")
+	cmd.Flags().IntVar(&cfg.SampleCount, "sample-count", cfg.SampleCount, "Sample lookups per table")
+	cmd.Flags().IntVar(&cfg.ReadConnections, "read-conns", cfg.ReadConnections, "SQLite read connections for standalone validation")
+	cmd.Flags().DurationVar(&timeout, "timeout", 0, "Validation timeout; 0 disables the timeout")
 	cmd.Flags().Int64Var(&cfg.SoftHeapLimit, "soft-heap-limit", cfg.SoftHeapLimit, "SQLite soft heap limit in bytes; use 0 to disable, negative to leave unchanged")
 	return cmd
 }

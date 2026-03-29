@@ -107,7 +107,7 @@ func TestReplayDayAndValidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.OK || result.FingerprintCount != 1 || result.SubFingerprintCount == 0 {
+	if !result.OK {
 		t.Fatalf("unexpected validation result: %#v", result)
 	}
 }
