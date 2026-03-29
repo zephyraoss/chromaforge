@@ -46,6 +46,14 @@ func TestApplyBuildPragmasBulkLoadModeThenFinalizeToWAL(t *testing.T) {
 	if err := ApplyIndexPragmas(ctx, db, 4, 0, 0); err != nil {
 		t.Fatal(err)
 	}
+
+	if err := db.QueryRowContext(ctx, `PRAGMA temp_store;`).Scan(&tempStore); err != nil {
+		t.Fatal(err)
+	}
+	if tempStore != 1 {
+		t.Fatalf("index temp_store = %d, want 1 (FILE)", tempStore)
+	}
+
 	if err := ApplyFinalizePragmas(ctx, db); err != nil {
 		t.Fatal(err)
 	}

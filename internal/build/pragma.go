@@ -42,7 +42,8 @@ func ApplyBuildPragmas(ctx context.Context, db *sql.DB, cacheSizeBytes, mmapSize
 func ApplyIndexPragmas(ctx context.Context, db *sql.DB, threads int, cacheSizeBytes, mmapSizeBytes int64) error {
 	pragmas := []string{
 		`PRAGMA threads = ` + itoa(threads) + `;`,
-		`PRAGMA cache_spill = OFF;`,
+		`PRAGMA temp_store = FILE;`,
+		`PRAGMA cache_spill = ON;`,
 		pragmaCacheSizeBytes(resolvePragmaBytes(cacheSizeBytes, defaultIndexCacheSizeBytes)),
 		pragmaMmapSizeBytes(resolvePragmaBytes(mmapSizeBytes, defaultIndexMmapSizeBytes)),
 	}

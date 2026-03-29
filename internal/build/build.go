@@ -21,23 +21,25 @@ import (
 )
 
 type Config struct {
-	DBPath          string
-	OutputPath      string
-	Workers         int
-	DecodeWorkers   int
-	BatchSize       int
-	SelfDeallocate  bool
-	StartYear       int
-	EndDate         string
-	CacheDir        string
-	BaseURL         string
-	GoMaxProcs      int
-	SoftHeapLimit   int64
-	CacheSizeBytes  int64
-	MmapSizeBytes   int64
-	DownloadWorkers int
-	HTTPClient      *http.Client
-	GracefulStop    <-chan struct{}
+	DBPath              string
+	OutputPath          string
+	Workers             int
+	DecodeWorkers       int
+	BatchSize           int
+	SelfDeallocate      bool
+	StartYear           int
+	EndDate             string
+	CacheDir            string
+	BaseURL             string
+	GoMaxProcs          int
+	SoftHeapLimit       int64
+	CacheSizeBytes      int64
+	MmapSizeBytes       int64
+	IndexCacheSizeBytes int64
+	IndexMmapSizeBytes  int64
+	DownloadWorkers     int
+	HTTPClient          *http.Client
+	GracefulStop        <-chan struct{}
 }
 
 type downloader struct {
@@ -75,6 +77,12 @@ func Run(ctx context.Context, cfg Config) error {
 	if cfg.MmapSizeBytes < 0 {
 		return fmt.Errorf("mmap size must be >= 0, got %d", cfg.MmapSizeBytes)
 	}
+	if cfg.IndexCacheSizeBytes < 0 {
+		return fmt.Errorf("index cache size must be >= 0, got %d", cfg.IndexCacheSizeBytes)
+	}
+	if cfg.IndexMmapSizeBytes < 0 {
+		return fmt.Errorf("index mmap size must be >= 0, got %d", cfg.IndexMmapSizeBytes)
+	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = defaultHTTPClient(cfg.DownloadWorkers)
 	}
@@ -82,7 +90,7 @@ func Run(ctx context.Context, cfg Config) error {
 		cfg.CacheDir = filepath.Join(filepath.Dir(cfg.DBPath), ".chromaforge-cache")
 	}
 
-	log.Printf("build started db=%s output=%s cache_dir=%s gomaxprocs=%d workers=%d decode_workers=%d batch_size=%d cache_size=%d mmap_size=%d", cfg.DBPath, cfg.OutputPath, cfg.CacheDir, effectiveGoMaxProcs, cfg.Workers, cfg.DecodeWorkers, cfg.BatchSize, cfg.CacheSizeBytes, cfg.MmapSizeBytes)
+	log.Printf("build started db=%s output=%s cache_dir=%s gomaxprocs=%d workers=%d decode_workers=%d batch_size=%d cache_size=%d mmap_size=%d index_cache_size=%d index_mmap_size=%d", cfg.DBPath, cfg.OutputPath, cfg.CacheDir, effectiveGoMaxProcs, cfg.Workers, cfg.DecodeWorkers, cfg.BatchSize, cfg.CacheSizeBytes, cfg.MmapSizeBytes, cfg.IndexCacheSizeBytes, cfg.IndexMmapSizeBytes)
 
 	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o755); err != nil {
 		return err
@@ -236,7 +244,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 	log.Printf("index build started")
 	indexStart := time.Now()
-	if err := ApplyIndexPragmas(ctx, db, cfg.Workers, cfg.CacheSizeBytes, cfg.MmapSizeBytes); err != nil {
+	if err := ApplyIndexPragmas(ctx, db, cfg.Workers, cfg.IndexCacheSizeBytes, cfg.IndexMmapSizeBytes); err != nil {
 		return err
 	}
 	if _, err := db.ExecContext(ctx, schema.CreateAcoustIDIndex); err != nil {

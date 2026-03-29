@@ -14,7 +14,7 @@ Incremental updates are handled by Chromakopia, not this repository.
 - Prefetches upcoming AcoustID archive files in background download workers while replay/index work is running
 - `--download-workers` controls that background download concurrency
 - `--gomaxprocs`, `--decode-workers`, and `--workers` let you tune CPU/core usage explicitly
-- `--cache-size` and `--mmap-size` let you override the SQLite page cache and mmap window in bytes
+- `--cache-size` and `--mmap-size` tune replay/write memory, while `--index-cache-size` and `--index-mmap-size` tune the later index-build phase
 - On first `Ctrl+C`, finishes the current day, saves resume progress beside `--db`, and exits cleanly; a second `Ctrl+C` aborts immediately
 - Supports `--soft-heap-limit` to cap SQLite heap usage for the process
 - Uses unsafe bulk-load mode with journaling disabled during replay/index builds, then finalizes the database back to WAL
@@ -56,6 +56,8 @@ chromaforge build \
   --download-workers 12 \
   --cache-size 4294967296 \
   --mmap-size 4294967296 \
+  --index-cache-size 2147483648 \
+  --index-mmap-size 2147483648 \
   --workers 16 \
   --decode-workers 16 \
   --batch-size 500 \
@@ -72,6 +74,8 @@ chromaforge build \
   --download-workers 12 \
   --cache-size 4294967296 \
   --mmap-size 4294967296 \
+  --index-cache-size 2147483648 \
+  --index-mmap-size 2147483648 \
   --workers 16 \
   --decode-workers 16 \
   --batch-size 500 \

@@ -41,18 +41,20 @@ func main() {
 
 func newBuildCmd() *cobra.Command {
 	cfg := build.Config{
-		DBPath:          "/mnt/nvme/chromakopia.db",
-		OutputPath:      "",
-		Workers:         0,
-		DecodeWorkers:   0,
-		BatchSize:       500,
-		CacheDir:        "",
-		BaseURL:         "https://data.acoustid.org",
-		GoMaxProcs:      0,
-		SoftHeapLimit:   -1,
-		CacheSizeBytes:  0,
-		MmapSizeBytes:   0,
-		DownloadWorkers: 4,
+		DBPath:              "/mnt/nvme/chromakopia.db",
+		OutputPath:          "",
+		Workers:             0,
+		DecodeWorkers:       0,
+		BatchSize:           500,
+		CacheDir:            "",
+		BaseURL:             "https://data.acoustid.org",
+		GoMaxProcs:          0,
+		SoftHeapLimit:       -1,
+		CacheSizeBytes:      0,
+		MmapSizeBytes:       0,
+		IndexCacheSizeBytes: 0,
+		IndexMmapSizeBytes:  0,
+		DownloadWorkers:     4,
 	}
 
 	cmd := &cobra.Command{
@@ -103,8 +105,10 @@ func newBuildCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cfg.EndDate, "end-date", "", "Replay archive through this date (YYYY-MM-DD, defaults to latest available)")
 	cmd.Flags().StringVar(&cfg.CacheDir, "cache-dir", cfg.CacheDir, "Directory for downloaded archive files (defaults to a cache directory beside --db)")
 	cmd.Flags().IntVar(&cfg.DownloadWorkers, "download-workers", cfg.DownloadWorkers, "Background archive download workers")
-	cmd.Flags().Int64Var(&cfg.CacheSizeBytes, "cache-size", cfg.CacheSizeBytes, "SQLite page cache target in bytes; 0 keeps the phase defaults")
-	cmd.Flags().Int64Var(&cfg.MmapSizeBytes, "mmap-size", cfg.MmapSizeBytes, "SQLite mmap_size in bytes; 0 keeps the phase defaults")
+	cmd.Flags().Int64Var(&cfg.CacheSizeBytes, "cache-size", cfg.CacheSizeBytes, "SQLite replay/write page cache target in bytes; 0 keeps the phase default")
+	cmd.Flags().Int64Var(&cfg.MmapSizeBytes, "mmap-size", cfg.MmapSizeBytes, "SQLite replay/write mmap_size in bytes; 0 keeps the phase default")
+	cmd.Flags().Int64Var(&cfg.IndexCacheSizeBytes, "index-cache-size", cfg.IndexCacheSizeBytes, "SQLite index-build page cache target in bytes; 0 keeps the phase default")
+	cmd.Flags().Int64Var(&cfg.IndexMmapSizeBytes, "index-mmap-size", cfg.IndexMmapSizeBytes, "SQLite index-build mmap_size in bytes; 0 keeps the phase default")
 	cmd.Flags().Int64Var(&cfg.SoftHeapLimit, "soft-heap-limit", cfg.SoftHeapLimit, "SQLite soft heap limit in bytes; use 0 to disable, negative to leave unchanged")
 	_ = cmd.Flags().MarkHidden("start-year")
 	_ = cmd.Flags().MarkHidden("end-date")
