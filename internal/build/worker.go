@@ -29,8 +29,6 @@ SELECT acoustid FROM main.fingerprints
 type Record struct {
 	AcoustID string
 	MBID     string
-	Title    string
-	Artist   string
 	Duration int
 	SubFPs   []SubFP
 }
@@ -97,8 +95,8 @@ func (s *writeSession) NewBatchWriter(ctx context.Context, mode txMode) (*batchW
 	}
 
 	fpStmt, err := s.conn.PrepareContext(ctx, `
-INSERT INTO fingerprints (acoustid, mb_id, title, artist, duration)
-VALUES (?, ?, ?, ?, ?)
+INSERT INTO fingerprints (acoustid, mb_id, duration)
+VALUES (?, ?, ?)
 `)
 	if err != nil {
 		_, _ = s.conn.ExecContext(context.Background(), "ROLLBACK")
@@ -151,7 +149,7 @@ func (w *batchWriter) InsertBatch(ctx context.Context, batch []Record) (int64, i
 			}
 			continue
 		}
-		res, err := w.fpStmt.ExecContext(ctx, r.AcoustID, nullIfEmpty(r.MBID), nullIfEmpty(r.Title), nullIfEmpty(r.Artist), r.Duration)
+		res, err := w.fpStmt.ExecContext(ctx, r.AcoustID, nullIfEmpty(r.MBID), r.Duration)
 		if err != nil {
 			return insertedFPs, insertedSubs, err
 		}

@@ -81,7 +81,7 @@ func TestIndexStageStatusDetectsCompletedIndexesAndStats(t *testing.T) {
 	if _, err := db.ExecContext(ctx, schema.CreateSubFingerprintsTable); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO fingerprints (acoustid, mb_id, title, artist, duration) VALUES ('acoustid-1', 'mbid-1', 'title-1', 'artist-1', 30)`); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO fingerprints (acoustid, mb_id, duration) VALUES ('acoustid-1', 'mbid-1', 30)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO sub_fingerprints (hash, fingerprint_id, position) VALUES (123, 1, 0), (123, 1, 1)`); err != nil {

@@ -41,7 +41,6 @@ type metadataBackfillStats struct {
 type metadataReplayState struct {
 	mu                     sync.RWMutex
 	trackGID               map[int64]string
-	trackMeta              map[int64]trackMeta
 	trackMBID              map[int64]string
 	fingerprintTrack       map[int64]int64
 	targetAcoustIDs        *compactAcoustIDSet
@@ -63,18 +62,14 @@ const (
 CREATE TEMP TABLE IF NOT EXISTS candidate_metadata (
 	acoustid TEXT PRIMARY KEY,
 	mb_id TEXT,
-	title TEXT,
-	artist TEXT,
 	duration INTEGER
 ) WITHOUT ROWID
 `
 	insertCandidateMetadataSQL = `
-INSERT INTO temp.candidate_metadata (acoustid, mb_id, title, artist, duration)
-VALUES (?, ?, ?, ?, ?)
+INSERT INTO temp.candidate_metadata (acoustid, mb_id, duration)
+VALUES (?, ?, ?)
 ON CONFLICT(acoustid) DO UPDATE SET
 	mb_id = COALESCE(NULLIF(candidate_metadata.mb_id, ''), NULLIF(excluded.mb_id, '')),
-	title = COALESCE(NULLIF(candidate_metadata.title, ''), NULLIF(excluded.title, '')),
-	artist = COALESCE(NULLIF(candidate_metadata.artist, ''), NULLIF(excluded.artist, '')),
 	duration = CASE
 		WHEN COALESCE(candidate_metadata.duration, 0) > 0 THEN candidate_metadata.duration
 		WHEN COALESCE(excluded.duration, 0) > 0 THEN excluded.duration
@@ -87,14 +82,6 @@ SET
 	mb_id = CASE
 		WHEN COALESCE(mb_id, '') = '' THEN NULLIF((SELECT cm.mb_id FROM temp.candidate_metadata cm WHERE cm.acoustid = fingerprints.acoustid), '')
 		ELSE mb_id
-	END,
-	title = CASE
-		WHEN COALESCE(title, '') = '' THEN NULLIF((SELECT cm.title FROM temp.candidate_metadata cm WHERE cm.acoustid = fingerprints.acoustid), '')
-		ELSE title
-	END,
-	artist = CASE
-		WHEN COALESCE(artist, '') = '' THEN NULLIF((SELECT cm.artist FROM temp.candidate_metadata cm WHERE cm.acoustid = fingerprints.acoustid), '')
-		ELSE artist
 	END,
 	duration = CASE
 		WHEN COALESCE(duration, 0) <= 0 THEN COALESCE((SELECT cm.duration FROM temp.candidate_metadata cm WHERE cm.acoustid = fingerprints.acoustid), duration)
@@ -274,7 +261,6 @@ func RunMetadataBackfill(ctx context.Context, cfg MetadataBackfillConfig) error 
 func newMetadataReplayState(targetAcoustIDs *compactAcoustIDSet) *metadataReplayState {
 	return &metadataReplayState{
 		trackGID:               map[int64]string{},
-		trackMeta:              map[int64]trackMeta{},
 		trackMBID:              map[int64]string{},
 		fingerprintTrack:       map[int64]int64{},
 		targetAcoustIDs:        targetAcoustIDs,
@@ -288,8 +274,6 @@ SELECT acoustid
 FROM fingerprints
 WHERE
 	COALESCE(mb_id, '') = ''
-	OR COALESCE(title, '') = ''
-	OR COALESCE(artist, '') = ''
 	OR COALESCE(duration, 0) <= 0
 `)
 	if err != nil {
@@ -380,27 +364,6 @@ func (s *metadataReplayState) ApplyTrack(v dump.TrackUpdate) {
 	}
 }
 
-func (s *metadataReplayState) ApplyTrackMeta(v dump.TrackMetaUpdate) {
-	if v.TrackID == 0 || (v.Track == "" && v.Artist == "") {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.trackGID[v.TrackID]; !ok {
-		return
-	}
-	current := s.trackMeta[v.TrackID]
-	if current.title == "" && v.Track != "" {
-		current.title = v.Track
-	}
-	if current.artist == "" && v.Artist != "" {
-		current.artist = v.Artist
-	}
-	if current.title != "" || current.artist != "" {
-		s.trackMeta[v.TrackID] = current
-	}
-}
-
 func (s *metadataReplayState) ApplyTrackMBID(v dump.TrackMBIDUpdate) {
 	if v.TrackID == 0 || v.MBID == "" || v.Disabled {
 		return
@@ -430,20 +393,19 @@ func (s *metadataReplayState) ApplyTrackFingerprint(v dump.TrackFingerprintUpdat
 	}
 }
 
-func (s *metadataReplayState) ResolveFingerprint(id int64) (acoustID, mbid, title, artist string, ok bool) {
+func (s *metadataReplayState) ResolveFingerprint(id int64) (acoustID, mbid string, ok bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	trackID, ok := s.fingerprintTrack[id]
 	if !ok {
-		return "", "", "", "", false
+		return "", "", false
 	}
 	acoustID, ok = s.trackGID[trackID]
 	if !ok || acoustID == "" {
-		return "", "", "", "", false
+		return "", "", false
 	}
-	meta := s.trackMeta[trackID]
 	mbid = s.trackMBID[trackID]
-	return acoustID, mbid, meta.title, meta.artist, true
+	return acoustID, mbid, true
 }
 
 func (s *metadataReplayState) HasPendingFingerprints() bool {
@@ -475,21 +437,18 @@ func (s *metadataReplayState) ResolveFingerprintMetadata(id int64) (Record, bool
 	if !ok {
 		return Record{}, false
 	}
-	meta := s.trackMeta[trackID]
 	mbid := s.trackMBID[trackID]
 	delete(s.unresolvedFingerprints, id)
 	return Record{
 		AcoustID: acoustID,
 		MBID:     mbid,
-		Title:    meta.title,
-		Artist:   meta.artist,
 	}, true
 }
 
 func ReplayMetadataStateDay(ctx context.Context, client DownloadClient, cacheDir string, day dump.DayFiles, state *metadataReplayState) error {
 	for _, file := range day.OrderedFiles() {
 		switch file.Type {
-		case dump.FileTypeMeta, dump.FileTypeFingerprint:
+		case dump.FileTypeMeta, dump.FileTypeFingerprint, dump.FileTypeTrackMeta:
 			continue
 		}
 
@@ -505,17 +464,6 @@ func ReplayMetadataStateDay(ctx context.Context, client DownloadClient, cacheDir
 					return err
 				}
 				state.ApplyTrack(v)
-				return nil
-			}); err != nil {
-				return err
-			}
-		case dump.FileTypeTrackMeta:
-			if err := dump.ScanGzipLines(ctx, localPath, func(line []byte) error {
-				var v dump.TrackMetaUpdate
-				if err := dump.DecodeJSONLine(line, &v); err != nil {
-					return err
-				}
-				state.ApplyTrackMeta(v)
 				return nil
 			}); err != nil {
 				return err
@@ -549,6 +497,9 @@ func ReplayMetadataStateDay(ctx context.Context, client DownloadClient, cacheDir
 
 func BackfillMetadataDay(ctx context.Context, session *metadataBackfillSession, client DownloadClient, cacheDir string, day dump.DayFiles, state *metadataReplayState, stats *metadataBackfillStats, decodeWorkers int) error {
 	for _, file := range day.OrderedFiles() {
+		if file.Type == dump.FileTypeTrackMeta {
+			continue
+		}
 		localPath := filepath.Join(cacheDir, day.Day.Format("2006-01"), file.Name)
 		if err := client.Ensure(ctx, file, localPath); err != nil {
 			return err
@@ -561,17 +512,6 @@ func BackfillMetadataDay(ctx context.Context, session *metadataBackfillSession, 
 					return err
 				}
 				state.ApplyTrack(v)
-				return nil
-			}); err != nil {
-				return err
-			}
-		case dump.FileTypeTrackMeta:
-			if err := dump.ScanGzipLines(ctx, localPath, func(line []byte) error {
-				var v dump.TrackMetaUpdate
-				if err := dump.DecodeJSONLine(line, &v); err != nil {
-					return err
-				}
-				state.ApplyTrackMeta(v)
 				return nil
 			}); err != nil {
 				return err
@@ -707,8 +647,6 @@ func backfillMetadataFile(ctx context.Context, session *metadataBackfillSession,
 		if _, err := session.insertStmt.ExecContext(ctx,
 			record.AcoustID,
 			nullIfEmpty(record.MBID),
-			nullIfEmpty(record.Title),
-			nullIfEmpty(record.Artist),
 			record.Duration,
 		); err != nil {
 			return err
@@ -738,12 +676,6 @@ func mergeMetadataRecord(dst, src Record) Record {
 	}
 	if dst.MBID == "" && src.MBID != "" {
 		dst.MBID = src.MBID
-	}
-	if dst.Title == "" && src.Title != "" {
-		dst.Title = src.Title
-	}
-	if dst.Artist == "" && src.Artist != "" {
-		dst.Artist = src.Artist
 	}
 	if dst.Duration <= 0 && src.Duration > 0 {
 		dst.Duration = src.Duration

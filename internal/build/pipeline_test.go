@@ -16,30 +16,26 @@ func TestReplayStateFirstSeenWins(t *testing.T) {
 	state := NewReplayState()
 	state.ApplyTrack(dump.TrackUpdate{ID: 10, GID: "gid-1"})
 	state.ApplyTrack(dump.TrackUpdate{ID: 10, GID: "gid-2"})
-	state.ApplyTrackMeta(dump.TrackMetaUpdate{TrackID: 10, Track: "title-1", Artist: "artist-1"})
-	state.ApplyTrackMeta(dump.TrackMetaUpdate{TrackID: 10, Track: "title-2", Artist: "artist-2"})
 	state.ApplyTrackMBID(dump.TrackMBIDUpdate{TrackID: 10, MBID: "mbid-1"})
 	state.ApplyTrackMBID(dump.TrackMBIDUpdate{TrackID: 10, MBID: "mbid-2"})
 	state.ApplyTrackFingerprint(dump.TrackFingerprintUpdate{FingerprintID: 99, TrackID: 10})
 	state.ApplyTrackFingerprint(dump.TrackFingerprintUpdate{FingerprintID: 99, TrackID: 11})
 
-	acoustID, mbid, title, artist, ok := state.ResolveFingerprint(99)
-	if !ok || acoustID != "gid-1" || mbid != "mbid-1" || title != "title-1" || artist != "artist-1" {
-		t.Fatalf("unexpected resolution: ok=%t acoustid=%q mbid=%q title=%q artist=%q", ok, acoustID, mbid, title, artist)
+	acoustID, mbid, ok := state.ResolveFingerprint(99)
+	if !ok || acoustID != "gid-1" || mbid != "mbid-1" {
+		t.Fatalf("unexpected resolution: ok=%t acoustid=%q mbid=%q", ok, acoustID, mbid)
 	}
 }
 
-func TestReplayStateFillsMissingMetadataFromLaterUpdates(t *testing.T) {
+func TestReplayStateFillsMissingMBIDFromLaterUpdates(t *testing.T) {
 	state := NewReplayState()
 	state.ApplyTrack(dump.TrackUpdate{ID: 10, GID: "gid-1"})
-	state.ApplyTrackMeta(dump.TrackMetaUpdate{TrackID: 10, Track: "", Artist: ""})
-	state.ApplyTrackMeta(dump.TrackMetaUpdate{TrackID: 10, Track: "title-1", Artist: "artist-1"})
 	state.ApplyTrackMBID(dump.TrackMBIDUpdate{TrackID: 10, MBID: "mbid-1"})
 	state.ApplyTrackFingerprint(dump.TrackFingerprintUpdate{FingerprintID: 99, TrackID: 10})
 
-	acoustID, mbid, title, artist, ok := state.ResolveFingerprint(99)
-	if !ok || acoustID != "gid-1" || mbid != "mbid-1" || title != "title-1" || artist != "artist-1" {
-		t.Fatalf("unexpected resolution: ok=%t acoustid=%q mbid=%q title=%q artist=%q", ok, acoustID, mbid, title, artist)
+	acoustID, mbid, ok := state.ResolveFingerprint(99)
+	if !ok || acoustID != "gid-1" || mbid != "mbid-1" {
+		t.Fatalf("unexpected resolution: ok=%t acoustid=%q mbid=%q", ok, acoustID, mbid)
 	}
 }
 
@@ -152,9 +148,6 @@ func TestReplayDayResumeDedupeUsesTempSeenTable(t *testing.T) {
 	dayOne := makeTestDayFiles(t, cacheDir, "2026-03-26", map[dump.FileType][]any{
 		dump.FileTypeTrack: {
 			dump.TrackUpdate{ID: 1, GID: "acoustid-1"},
-		},
-		dump.FileTypeTrackMeta: {
-			dump.TrackMetaUpdate{TrackID: 1, Track: "Track One", Artist: "Artist One"},
 		},
 		dump.FileTypeTrackMBID: {
 			dump.TrackMBIDUpdate{TrackID: 1, MBID: "mbid-1"},

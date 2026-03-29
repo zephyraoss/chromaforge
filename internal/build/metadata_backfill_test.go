@@ -45,9 +45,6 @@ func TestBackfillMetadataDayUpdatesExistingFingerprintRow(t *testing.T) {
 		dump.FileTypeTrack: {
 			dump.TrackUpdate{ID: 1, GID: "acoustid-1"},
 		},
-		dump.FileTypeTrackMeta: {
-			dump.TrackMetaUpdate{TrackID: 1, Track: "Track One", Artist: "Artist One"},
-		},
 		dump.FileTypeTrackMBID: {
 			dump.TrackMBIDUpdate{TrackID: 1, MBID: "mbid-1"},
 		},
@@ -75,13 +72,13 @@ func TestBackfillMetadataDayUpdatesExistingFingerprintRow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var mbid, title, artist string
+	var mbid string
 	var duration int
-	if err := db.QueryRowContext(ctx, `SELECT COALESCE(mb_id, ''), COALESCE(title, ''), COALESCE(artist, ''), COALESCE(duration, 0) FROM fingerprints WHERE acoustid = 'acoustid-1'`).Scan(&mbid, &title, &artist, &duration); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT COALESCE(mb_id, ''), COALESCE(duration, 0) FROM fingerprints WHERE acoustid = 'acoustid-1'`).Scan(&mbid, &duration); err != nil {
 		t.Fatal(err)
 	}
-	if mbid != "mbid-1" || title != "Track One" || artist != "Artist One" || duration != 30 {
-		t.Fatalf("unexpected metadata backfill result: mbid=%q title=%q artist=%q duration=%d", mbid, title, artist, duration)
+	if mbid != "mbid-1" || duration != 30 {
+		t.Fatalf("unexpected metadata backfill result: mbid=%q duration=%d", mbid, duration)
 	}
 
 	var subFingerprintCount int

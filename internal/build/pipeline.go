@@ -25,20 +25,13 @@ const (
 type ReplayState struct {
 	mu               sync.RWMutex
 	trackGID         map[int64]string
-	trackMeta        map[int64]trackMeta
 	trackMBID        map[int64]string
 	fingerprintTrack map[int64]int64
-}
-
-type trackMeta struct {
-	title  string
-	artist string
 }
 
 func NewReplayState() *ReplayState {
 	return &ReplayState{
 		trackGID:         map[int64]string{},
-		trackMeta:        map[int64]trackMeta{},
 		trackMBID:        map[int64]string{},
 		fingerprintTrack: map[int64]int64{},
 	}
@@ -51,24 +44,6 @@ func (s *ReplayState) ApplyTrack(v dump.TrackUpdate) {
 	s.mu.Lock()
 	if _, ok := s.trackGID[v.ID]; !ok {
 		s.trackGID[v.ID] = v.GID
-	}
-	s.mu.Unlock()
-}
-
-func (s *ReplayState) ApplyTrackMeta(v dump.TrackMetaUpdate) {
-	if v.TrackID == 0 || (v.Track == "" && v.Artist == "") {
-		return
-	}
-	s.mu.Lock()
-	current := s.trackMeta[v.TrackID]
-	if current.title == "" && v.Track != "" {
-		current.title = v.Track
-	}
-	if current.artist == "" && v.Artist != "" {
-		current.artist = v.Artist
-	}
-	if current.title != "" || current.artist != "" {
-		s.trackMeta[v.TrackID] = current
 	}
 	s.mu.Unlock()
 }
@@ -95,21 +70,20 @@ func (s *ReplayState) ApplyTrackFingerprint(v dump.TrackFingerprintUpdate) {
 	s.mu.Unlock()
 }
 
-func (s *ReplayState) ResolveFingerprint(id int64) (acoustID, mbid, title, artist string, ok bool) {
+func (s *ReplayState) ResolveFingerprint(id int64) (acoustID, mbid string, ok bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	trackID, ok := s.fingerprintTrack[id]
 	if !ok {
-		return "", "", "", "", false
+		return "", "", false
 	}
 	acoustID, ok = s.trackGID[trackID]
 	if !ok || acoustID == "" {
-		return "", "", "", "", false
+		return "", "", false
 	}
-	meta := s.trackMeta[trackID]
 	mbid = s.trackMBID[trackID]
-	return acoustID, mbid, meta.title, meta.artist, true
+	return acoustID, mbid, true
 }
 
 type Stats struct {
@@ -149,6 +123,9 @@ func (s *Stats) overBadRecordThreshold() bool {
 
 func ReplayDay(ctx context.Context, writer *writeSession, client DownloadClient, cfg Config, day dump.DayFiles, state *ReplayState, stats *Stats, mode txMode, totalEstimate int64) error {
 	for _, file := range day.OrderedFiles() {
+		if file.Type == dump.FileTypeTrackMeta {
+			continue
+		}
 		localPath := filepath.Join(cfg.CacheDir, day.Day.Format("2006-01"), file.Name)
 		if err := client.Ensure(ctx, file, localPath); err != nil {
 			return err
@@ -161,17 +138,6 @@ func ReplayDay(ctx context.Context, writer *writeSession, client DownloadClient,
 					return err
 				}
 				state.ApplyTrack(v)
-				return nil
-			}); err != nil {
-				return err
-			}
-		case dump.FileTypeTrackMeta:
-			if err := dump.ScanGzipLines(ctx, localPath, func(line []byte) error {
-				var v dump.TrackMetaUpdate
-				if err := dump.DecodeJSONLine(line, &v); err != nil {
-					return err
-				}
-				state.ApplyTrackMeta(v)
 				return nil
 			}); err != nil {
 				return err
@@ -212,7 +178,7 @@ func ReplayDay(ctx context.Context, writer *writeSession, client DownloadClient,
 func ReplayStateDay(ctx context.Context, client DownloadClient, cfg Config, day dump.DayFiles, state *ReplayState) error {
 	for _, file := range day.OrderedFiles() {
 		switch file.Type {
-		case dump.FileTypeMeta, dump.FileTypeFingerprint:
+		case dump.FileTypeMeta, dump.FileTypeFingerprint, dump.FileTypeTrackMeta:
 			continue
 		}
 
@@ -228,17 +194,6 @@ func ReplayStateDay(ctx context.Context, client DownloadClient, cfg Config, day 
 					return err
 				}
 				state.ApplyTrack(v)
-				return nil
-			}); err != nil {
-				return err
-			}
-		case dump.FileTypeTrackMeta:
-			if err := dump.ScanGzipLines(ctx, localPath, func(line []byte) error {
-				var v dump.TrackMetaUpdate
-				if err := dump.DecodeJSONLine(line, &v); err != nil {
-					return err
-				}
-				state.ApplyTrackMeta(v)
 				return nil
 			}); err != nil {
 				return err
@@ -329,7 +284,7 @@ func replayFingerprintFile(ctx context.Context, writer *writeSession, path strin
 					}
 					continue
 				}
-				acoustID, mbid, title, artist, ok := state.ResolveFingerprint(payload.ID)
+				acoustID, mbid, ok := state.ResolveFingerprint(payload.ID)
 				if !ok {
 					stats.skipped.Add(1)
 					stats.processed.Add(1)
@@ -343,8 +298,6 @@ func replayFingerprintFile(ctx context.Context, writer *writeSession, path strin
 				rec := Record{
 					AcoustID: acoustID,
 					MBID:     mbid,
-					Title:    title,
-					Artist:   artist,
 					Duration: payload.Length,
 					SubFPs:   convertSubFPs(dump.ExtractSubFingerprints(fp)),
 				}

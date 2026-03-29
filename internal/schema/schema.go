@@ -6,8 +6,6 @@ CREATE TABLE IF NOT EXISTS fingerprints (
     id       INTEGER PRIMARY KEY,
     acoustid TEXT NOT NULL,
     mb_id    TEXT,
-    title    TEXT,
-    artist   TEXT,
     duration INTEGER
 );`
 

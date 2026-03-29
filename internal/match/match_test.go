@@ -42,9 +42,9 @@ func TestRunDBWithFingerprintReturnsBestCandidate(t *testing.T) {
 	if _, err := db.ExecContext(ctx, schema.CreateSubFingerprintsTable); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO fingerprints (id, acoustid, mb_id, title, artist, duration) VALUES
-		(1, 'acoustid-1', 'mbid-1', 'Track One', 'Artist One', 30),
-		(2, 'acoustid-2', 'mbid-2', 'Track Two', 'Artist Two', 30)`); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO fingerprints (id, acoustid, mb_id, duration) VALUES
+		(1, 'acoustid-1', 'mbid-1', 30),
+		(2, 'acoustid-2', 'mbid-2', 30)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO sub_fingerprints (hash, fingerprint_id, position) VALUES
@@ -104,8 +104,8 @@ func TestRunDBWithWrappedUint32FingerprintReturnsBestCandidate(t *testing.T) {
 	if _, err := db.ExecContext(ctx, schema.CreateSubFingerprintsTable); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO fingerprints (id, acoustid, mb_id, title, artist, duration) VALUES
-		(1, 'acoustid-1', 'mbid-1', 'Track One', 'Artist One', 30)`); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO fingerprints (id, acoustid, mb_id, duration) VALUES
+		(1, 'acoustid-1', 'mbid-1', 30)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO sub_fingerprints (hash, fingerprint_id, position) VALUES
@@ -151,9 +151,9 @@ func TestRunDBWithFingerprintFiltersByDurationWindow(t *testing.T) {
 	if _, err := db.ExecContext(ctx, schema.CreateSubFingerprintsTable); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `INSERT INTO fingerprints (id, acoustid, mb_id, title, artist, duration) VALUES
-		(1, 'wrong-duration', 'mbid-1', 'Wrong Duration', 'Artist One', 381),
-		(2, 'right-duration', 'mbid-2', 'Right Duration', 'Artist Two', 350)`); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO fingerprints (id, acoustid, mb_id, duration) VALUES
+		(1, 'wrong-duration', 'mbid-1', 381),
+		(2, 'right-duration', 'mbid-2', 350)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO sub_fingerprints (hash, fingerprint_id, position) VALUES

@@ -36,7 +36,7 @@ Incremental updates are handled by Chromakopia, not this repository.
 `chromaforge backfill-metadata`
 
 - Replays archive metadata into an existing database without rebuilding `sub_fingerprints`
-- Fills missing `mb_id`, `title`, `artist`, and `duration` values in place
+- Fills missing `mb_id` and `duration` values in place
 - Uses `--decode-workers` to parallelize fingerprint JSON decode/filter work while keeping SQLite writes sequential
 - Uses a separate resume file beside `--db` so interrupted backfills can continue later
 - Leaves existing fingerprint hashes and indexes intact
@@ -193,7 +193,7 @@ docker build -t chromaforge:latest .
 
 - The final database contains only `fingerprints` and `sub_fingerprints`, plus `idx_hash`.
 - Build-time replay state is held outside the final schema.
-- The implementation accepts `track_meta-update` files in the public archive because those records carry joinable track metadata for `title` and `artist`.
+- `track_meta-update` files are ignored because `title` and `artist` are no longer stored in the database.
 - Metadata backfill and duplicate-acoustid ingest only fill missing metadata fields; they do not overwrite existing non-empty values.
 
 ## License
