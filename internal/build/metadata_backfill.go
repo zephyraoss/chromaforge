@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,6 +23,7 @@ type MetadataBackfillConfig struct {
 	CacheDir        string
 	BaseURL         string
 	GoMaxProcs      int
+	DecodeWorkers   int
 	StartYear       int
 	EndDate         string
 	DownloadWorkers int
@@ -32,6 +34,16 @@ type MetadataBackfillConfig struct {
 type metadataBackfillStats struct {
 	processed atomic.Int64
 	updated   atomic.Int64
+}
+
+type metadataReplayState struct {
+	mu                     sync.RWMutex
+	trackGID               map[int64]string
+	trackMeta              map[int64]trackMeta
+	trackMBID              map[int64]string
+	fingerprintTrack       map[int64]int64
+	targetAcoustIDs        map[string]struct{}
+	unresolvedFingerprints map[int64]struct{}
 }
 
 type metadataBackfillSession struct {
@@ -91,6 +103,11 @@ WHERE acoustid IN (SELECT acoustid FROM temp.candidate_metadata)
 	clearCandidateMetadataSQL = `DELETE FROM temp.candidate_metadata`
 )
 
+const (
+	metadataRawLineBuffer = 20000
+	metadataRecordBuffer  = 20000
+)
+
 func RunMetadataBackfill(ctx context.Context, cfg MetadataBackfillConfig) error {
 	start := time.Now()
 	if cfg.GoMaxProcs > 0 {
@@ -101,6 +118,9 @@ func RunMetadataBackfill(ctx context.Context, cfg MetadataBackfillConfig) error 
 	}
 	if cfg.DownloadWorkers <= 0 {
 		cfg.DownloadWorkers = 4
+	}
+	if cfg.DecodeWorkers <= 0 {
+		cfg.DecodeWorkers = runtime.GOMAXPROCS(0)
 	}
 	if cfg.CacheDir == "" {
 		cfg.CacheDir = filepath.Join(filepath.Dir(cfg.DBPath), ".chromaforge-cache")
@@ -113,7 +133,7 @@ func RunMetadataBackfill(ctx context.Context, cfg MetadataBackfillConfig) error 
 		return err
 	}
 
-	log.Printf("metadata backfill started db=%s cache_dir=%s gomaxprocs=%d download_workers=%d", cfg.DBPath, cfg.CacheDir, runtime.GOMAXPROCS(0), cfg.DownloadWorkers)
+	log.Printf("metadata backfill started db=%s cache_dir=%s gomaxprocs=%d decode_workers=%d download_workers=%d", cfg.DBPath, cfg.CacheDir, runtime.GOMAXPROCS(0), cfg.DecodeWorkers, cfg.DownloadWorkers)
 
 	db, err := libsqlutil.OpenLocal(cfg.DBPath)
 	if err != nil {
@@ -133,6 +153,16 @@ func RunMetadataBackfill(ctx context.Context, cfg MetadataBackfillConfig) error 
 	if _, err := db.ExecContext(ctx, schema.CreateAcoustIDIndex); err != nil {
 		return err
 	}
+
+	targetAcoustIDs, err := loadIncompleteMetadataAcoustIDs(ctx, db)
+	if err != nil {
+		return err
+	}
+	if len(targetAcoustIDs) == 0 {
+		log.Printf("metadata backfill skipped: no fingerprints have missing metadata")
+		return nil
+	}
+	log.Printf("metadata backfill target_acoustids=%d", len(targetAcoustIDs))
 
 	progress, hasProgress, err := loadMetadataBackfillProgress(cfg.DBPath)
 	if err != nil {
@@ -155,7 +185,7 @@ func RunMetadataBackfill(ctx context.Context, cfg MetadataBackfillConfig) error 
 	}
 	log.Printf("archive discovery completed: %d days", len(days))
 
-	state := NewReplayState()
+	state := newMetadataReplayState(targetAcoustIDs)
 	startIdx, hasResume, err := findReplayStartIndex(days, resumeFromDay)
 	if err != nil {
 		return err
@@ -168,7 +198,7 @@ func RunMetadataBackfill(ctx context.Context, cfg MetadataBackfillConfig) error 
 			for i := 0; i < startIdx; i++ {
 				day := days[i]
 				log.Printf("metadata backfill resume state rebuild day=%s", day.Day.Format("2006-01-02"))
-				if err := ReplayStateDay(ctx, dl, Config{CacheDir: cfg.CacheDir}, day, state); err != nil {
+				if err := ReplayMetadataStateDay(ctx, dl, cfg.CacheDir, day, state); err != nil {
 					return err
 				}
 			}
@@ -210,7 +240,7 @@ func RunMetadataBackfill(ctx context.Context, cfg MetadataBackfillConfig) error 
 			}
 
 			log.Printf("metadata backfill day=%s", day.Day.Format("2006-01-02"))
-			if err := BackfillMetadataDay(ctx, session, pdl, cfg.CacheDir, day, state, stats); err != nil {
+			if err := BackfillMetadataDay(ctx, session, pdl, cfg.CacheDir, day, state, stats, cfg.DecodeWorkers); err != nil {
 				return err
 			}
 			if err := saveMetadataBackfillProgress(cfg.DBPath, day.Day); err != nil {
@@ -231,6 +261,46 @@ func RunMetadataBackfill(ctx context.Context, cfg MetadataBackfillConfig) error 
 	}
 	log.Printf("metadata backfill completed processed=%d updated=%d db=%s elapsed=%s", stats.processed.Load(), stats.updated.Load(), cfg.DBPath, time.Since(start).Round(time.Second))
 	return nil
+}
+
+func newMetadataReplayState(targetAcoustIDs map[string]struct{}) *metadataReplayState {
+	return &metadataReplayState{
+		trackGID:               map[int64]string{},
+		trackMeta:              map[int64]trackMeta{},
+		trackMBID:              map[int64]string{},
+		fingerprintTrack:       map[int64]int64{},
+		targetAcoustIDs:        targetAcoustIDs,
+		unresolvedFingerprints: map[int64]struct{}{},
+	}
+}
+
+func loadIncompleteMetadataAcoustIDs(ctx context.Context, db *sql.DB) (map[string]struct{}, error) {
+	rows, err := db.QueryContext(ctx, `
+SELECT acoustid
+FROM fingerprints
+WHERE
+	COALESCE(mb_id, '') = ''
+	OR COALESCE(title, '') = ''
+	OR COALESCE(artist, '') = ''
+	OR COALESCE(duration, 0) <= 0
+`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]struct{})
+	for rows.Next() {
+		var acoustid string
+		if err := rows.Scan(&acoustid); err != nil {
+			return nil, err
+		}
+		out[acoustid] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func newMetadataBackfillSession(ctx context.Context, db *sql.DB) (*metadataBackfillSession, error) {
@@ -272,7 +342,188 @@ func (s *metadataBackfillSession) Close() error {
 	return firstErr
 }
 
-func BackfillMetadataDay(ctx context.Context, session *metadataBackfillSession, client DownloadClient, cacheDir string, day dump.DayFiles, state *ReplayState, stats *metadataBackfillStats) error {
+func (s *metadataReplayState) ApplyTrack(v dump.TrackUpdate) {
+	if v.GID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.targetAcoustIDs[v.GID]; !ok {
+		return
+	}
+	if _, ok := s.trackGID[v.ID]; !ok {
+		s.trackGID[v.ID] = v.GID
+	}
+}
+
+func (s *metadataReplayState) ApplyTrackMeta(v dump.TrackMetaUpdate) {
+	if v.TrackID == 0 || (v.Track == "" && v.Artist == "") {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.trackGID[v.TrackID]; !ok {
+		return
+	}
+	current := s.trackMeta[v.TrackID]
+	if current.title == "" && v.Track != "" {
+		current.title = v.Track
+	}
+	if current.artist == "" && v.Artist != "" {
+		current.artist = v.Artist
+	}
+	if current.title != "" || current.artist != "" {
+		s.trackMeta[v.TrackID] = current
+	}
+}
+
+func (s *metadataReplayState) ApplyTrackMBID(v dump.TrackMBIDUpdate) {
+	if v.TrackID == 0 || v.MBID == "" || v.Disabled {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.trackGID[v.TrackID]; !ok {
+		return
+	}
+	if s.trackMBID[v.TrackID] == "" {
+		s.trackMBID[v.TrackID] = v.MBID
+	}
+}
+
+func (s *metadataReplayState) ApplyTrackFingerprint(v dump.TrackFingerprintUpdate) {
+	if v.TrackID == 0 || v.FingerprintID == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.trackGID[v.TrackID]; !ok {
+		return
+	}
+	if _, ok := s.fingerprintTrack[v.FingerprintID]; !ok {
+		s.fingerprintTrack[v.FingerprintID] = v.TrackID
+		s.unresolvedFingerprints[v.FingerprintID] = struct{}{}
+	}
+}
+
+func (s *metadataReplayState) ResolveFingerprint(id int64) (acoustID, mbid, title, artist string, ok bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	trackID, ok := s.fingerprintTrack[id]
+	if !ok {
+		return "", "", "", "", false
+	}
+	acoustID, ok = s.trackGID[trackID]
+	if !ok || acoustID == "" {
+		return "", "", "", "", false
+	}
+	meta := s.trackMeta[trackID]
+	mbid = s.trackMBID[trackID]
+	return acoustID, mbid, meta.title, meta.artist, true
+}
+
+func (s *metadataReplayState) HasPendingFingerprints() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.unresolvedFingerprints) > 0
+}
+
+func (s *metadataReplayState) NeedsFingerprint(id int64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.unresolvedFingerprints[id]
+	return ok
+}
+
+func (s *metadataReplayState) ResolveFingerprintMetadata(id int64) (Record, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.unresolvedFingerprints[id]; !ok {
+		return Record{}, false
+	}
+
+	trackID, ok := s.fingerprintTrack[id]
+	if !ok {
+		return Record{}, false
+	}
+	acoustID, ok := s.trackGID[trackID]
+	if !ok {
+		return Record{}, false
+	}
+	meta := s.trackMeta[trackID]
+	mbid := s.trackMBID[trackID]
+	delete(s.unresolvedFingerprints, id)
+	return Record{
+		AcoustID: acoustID,
+		MBID:     mbid,
+		Title:    meta.title,
+		Artist:   meta.artist,
+	}, true
+}
+
+func ReplayMetadataStateDay(ctx context.Context, client DownloadClient, cacheDir string, day dump.DayFiles, state *metadataReplayState) error {
+	for _, file := range day.OrderedFiles() {
+		switch file.Type {
+		case dump.FileTypeMeta, dump.FileTypeFingerprint:
+			continue
+		}
+
+		localPath := filepath.Join(cacheDir, day.Day.Format("2006-01"), file.Name)
+		if err := client.Ensure(ctx, file, localPath); err != nil {
+			return err
+		}
+		switch file.Type {
+		case dump.FileTypeTrack:
+			if err := dump.ScanGzipLines(ctx, localPath, func(line []byte) error {
+				var v dump.TrackUpdate
+				if err := dump.DecodeJSONLine(line, &v); err != nil {
+					return err
+				}
+				state.ApplyTrack(v)
+				return nil
+			}); err != nil {
+				return err
+			}
+		case dump.FileTypeTrackMeta:
+			if err := dump.ScanGzipLines(ctx, localPath, func(line []byte) error {
+				var v dump.TrackMetaUpdate
+				if err := dump.DecodeJSONLine(line, &v); err != nil {
+					return err
+				}
+				state.ApplyTrackMeta(v)
+				return nil
+			}); err != nil {
+				return err
+			}
+		case dump.FileTypeTrackMBID:
+			if err := dump.ScanGzipLines(ctx, localPath, func(line []byte) error {
+				var v dump.TrackMBIDUpdate
+				if err := dump.DecodeJSONLine(line, &v); err != nil {
+					return err
+				}
+				state.ApplyTrackMBID(v)
+				return nil
+			}); err != nil {
+				return err
+			}
+		case dump.FileTypeTrackFingerprint:
+			if err := dump.ScanGzipLines(ctx, localPath, func(line []byte) error {
+				var v dump.TrackFingerprintUpdate
+				if err := dump.DecodeJSONLine(line, &v); err != nil {
+					return err
+				}
+				state.ApplyTrackFingerprint(v)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func BackfillMetadataDay(ctx context.Context, session *metadataBackfillSession, client DownloadClient, cacheDir string, day dump.DayFiles, state *metadataReplayState, stats *metadataBackfillStats, decodeWorkers int) error {
 	for _, file := range day.OrderedFiles() {
 		localPath := filepath.Join(cacheDir, day.Day.Format("2006-01"), file.Name)
 		if err := client.Ensure(ctx, file, localPath); err != nil {
@@ -324,7 +575,10 @@ func BackfillMetadataDay(ctx context.Context, session *metadataBackfillSession, 
 				return err
 			}
 		case dump.FileTypeFingerprint:
-			if err := backfillMetadataFile(ctx, session, localPath, state, stats); err != nil {
+			if !state.HasPendingFingerprints() {
+				continue
+			}
+			if err := backfillMetadataFile(ctx, session, localPath, state, stats, decodeWorkers); err != nil {
 				return err
 			}
 		case dump.FileTypeMeta:
@@ -334,7 +588,83 @@ func BackfillMetadataDay(ctx context.Context, session *metadataBackfillSession, 
 	return nil
 }
 
-func backfillMetadataFile(ctx context.Context, session *metadataBackfillSession, path string, state *ReplayState, stats *metadataBackfillStats) error {
+func backfillMetadataFile(ctx context.Context, session *metadataBackfillSession, path string, state *metadataReplayState, stats *metadataBackfillStats, decodeWorkers int) error {
+	if decodeWorkers <= 0 {
+		decodeWorkers = 1
+	}
+
+	rawLines := make(chan []byte, metadataRawLineBuffer)
+	records := make(chan Record, metadataRecordBuffer)
+	errCh := make(chan error, 1)
+
+	reportErr := func(err error) {
+		select {
+		case errCh <- err:
+		default:
+		}
+	}
+
+	go func() {
+		defer close(rawLines)
+		if err := dump.ScanGzipLines(ctx, path, func(line []byte) error {
+			select {
+			case rawLines <- line:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}); err != nil {
+			reportErr(err)
+		}
+	}()
+
+	var decodeWG sync.WaitGroup
+	for i := 0; i < decodeWorkers; i++ {
+		decodeWG.Add(1)
+		go func() {
+			defer decodeWG.Done()
+			for line := range rawLines {
+				var payload fingerprintMetadataUpdate
+				if err := json.Unmarshal(line, &payload); err != nil {
+					reportErr(err)
+					return
+				}
+				record, ok := state.ResolveFingerprintMetadata(payload.ID)
+				if !ok {
+					continue
+				}
+				record.Duration = payload.Length
+				select {
+				case records <- record:
+					stats.processed.Add(1)
+				case <-ctx.Done():
+					reportErr(ctx.Err())
+					return
+				}
+			}
+		}()
+	}
+
+	go func() {
+		decodeWG.Wait()
+		close(records)
+	}()
+
+	candidates := make(map[string]Record)
+	for record := range records {
+		candidates[record.AcoustID] = mergeMetadataRecord(candidates[record.AcoustID], record)
+	}
+
+	select {
+	case err := <-errCh:
+		return err
+	default:
+	}
+
+	if len(candidates) == 0 {
+		return nil
+	}
+
 	if _, err := session.conn.ExecContext(ctx, "BEGIN"); err != nil {
 		return err
 	}
@@ -349,22 +679,7 @@ func backfillMetadataFile(ctx context.Context, session *metadataBackfillSession,
 		return err
 	}
 
-	if err := dump.ScanGzipLines(ctx, path, func(line []byte) error {
-		var payload fingerprintMetadataUpdate
-		if err := json.Unmarshal(line, &payload); err != nil {
-			return err
-		}
-		acoustID, mbid, title, artist, ok := state.ResolveFingerprint(payload.ID)
-		if !ok {
-			return nil
-		}
-		record := Record{
-			AcoustID: acoustID,
-			MBID:     mbid,
-			Title:    title,
-			Artist:   artist,
-			Duration: payload.Length,
-		}
+	for _, record := range candidates {
 		if _, err := session.insertStmt.ExecContext(ctx,
 			record.AcoustID,
 			nullIfEmpty(record.MBID),
@@ -374,10 +689,6 @@ func backfillMetadataFile(ctx context.Context, session *metadataBackfillSession,
 		); err != nil {
 			return err
 		}
-		stats.processed.Add(1)
-		return nil
-	}); err != nil {
-		return err
 	}
 
 	res, err := session.conn.ExecContext(ctx, applyCandidateMetadataSQL)
@@ -395,4 +706,23 @@ func backfillMetadataFile(ctx context.Context, session *metadataBackfillSession,
 	}
 	committed = true
 	return nil
+}
+
+func mergeMetadataRecord(dst, src Record) Record {
+	if dst.AcoustID == "" {
+		return src
+	}
+	if dst.MBID == "" && src.MBID != "" {
+		dst.MBID = src.MBID
+	}
+	if dst.Title == "" && src.Title != "" {
+		dst.Title = src.Title
+	}
+	if dst.Artist == "" && src.Artist != "" {
+		dst.Artist = src.Artist
+	}
+	if dst.Duration <= 0 && src.Duration > 0 {
+		dst.Duration = src.Duration
+	}
+	return dst
 }

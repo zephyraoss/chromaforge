@@ -64,9 +64,9 @@ func TestBackfillMetadataDayUpdatesExistingFingerprintRow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	state := NewReplayState()
+	state := newMetadataReplayState(map[string]struct{}{"acoustid-1": {}})
 	stats := &metadataBackfillStats{}
-	if err := BackfillMetadataDay(ctx, session, staticDownloader{}, cacheDir, day, state, stats); err != nil {
+	if err := BackfillMetadataDay(ctx, session, staticDownloader{}, cacheDir, day, state, stats, 4); err != nil {
 		t.Fatal(err)
 	}
 	if err := session.Close(); err != nil {

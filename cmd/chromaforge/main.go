@@ -164,6 +164,7 @@ func newBackfillMetadataCmd() *cobra.Command {
 		CacheDir:        "",
 		BaseURL:         "https://data.acoustid.org",
 		GoMaxProcs:      0,
+		DecodeWorkers:   0,
 		DownloadWorkers: 4,
 		SoftHeapLimit:   -1,
 	}
@@ -208,6 +209,7 @@ func newBackfillMetadataCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cfg.DBPath, "db", cfg.DBPath, "Existing database path to update in place")
 	cmd.Flags().StringVar(&cfg.CacheDir, "cache-dir", cfg.CacheDir, "Directory for downloaded archive files (defaults to a cache directory beside --db)")
 	cmd.Flags().IntVar(&cfg.GoMaxProcs, "gomaxprocs", cfg.GoMaxProcs, "Go scheduler CPU parallelism (defaults to runtime auto-detect)")
+	cmd.Flags().IntVar(&cfg.DecodeWorkers, "decode-workers", cfg.DecodeWorkers, "Parallel metadata decode workers (defaults to GOMAXPROCS)")
 	cmd.Flags().IntVar(&cfg.StartYear, "start-year", cfg.StartYear, "Replay archive from this year (defaults to earliest available)")
 	cmd.Flags().StringVar(&cfg.EndDate, "end-date", cfg.EndDate, "Replay archive through this date (YYYY-MM-DD, defaults to latest available)")
 	cmd.Flags().IntVar(&cfg.DownloadWorkers, "download-workers", cfg.DownloadWorkers, "Background archive download workers")

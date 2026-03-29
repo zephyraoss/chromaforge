@@ -37,6 +37,7 @@ Incremental updates are handled by Chromakopia, not this repository.
 
 - Replays archive metadata into an existing database without rebuilding `sub_fingerprints`
 - Fills missing `mb_id`, `title`, `artist`, and `duration` values in place
+- Uses `--decode-workers` to parallelize fingerprint JSON decode/filter work while keeping SQLite writes sequential
 - Uses a separate resume file beside `--db` so interrupted backfills can continue later
 - Leaves existing fingerprint hashes and indexes intact
 
@@ -133,7 +134,10 @@ chromaforge validate \
 
 ```bash
 chromaforge backfill-metadata \
-  --db /mnt/disk/chromakopia.db
+  --db /mnt/disk/chromakopia.db \
+  --gomaxprocs 32 \
+  --decode-workers 32 \
+  --download-workers 16
 ```
 
 ## Matching
