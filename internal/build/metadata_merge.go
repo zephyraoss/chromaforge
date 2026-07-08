@@ -11,14 +11,14 @@ SET
 		WHEN COALESCE(duration, 0) <= 0 AND ? > 0 THEN ?
 		ELSE duration
 	END
-WHERE acoustid = ?
+WHERE id = ?
 `
 
-func metadataMergeArgs(r Record) []any {
+func metadataMergeArgs(r Record, fingerprintID int64) []any {
 	mbid := nullIfEmpty(r.MBID)
 	return []any{
 		mbid, mbid,
 		r.Duration, r.Duration,
-		r.AcoustID,
+		fingerprintID,
 	}
 }

@@ -24,6 +24,90 @@ Incremental updates are handled by Chromakopia, not this repository.
 - Optionally `rsync`s the final `.db` to the configured output path
 - Optionally triggers Azure VM self-deallocation
 
+`chromaforge build-ckaf`
+
+- Replays the AcoustID archive straight into a CKAF dataset via [libchroma](https://github.com/zephyraoss/libchroma), skipping the SQLite intermediate
+- Emits three files sharing one dataset id: `<prefix>.ckd` (every fingerprint, PFOR-compressed), `<prefix>.cki` (sampled posting index, stride 8 / 2-bit quantization / skip interval 64, MBID-mapped fingerprints only), and `<prefix>.ckm` (fingerprint → track/MBID map for every fingerprint, nil MBID when unmapped)
+- Unmapped fingerprints stay in the `.ckd`/`.ckm` so they can be promoted into the posting index when new MBID mappings arrive
+- Deduplicates submissions per acoustid like `build`: the first fingerprint wins and later duplicates merge a missing duration by the recorded fingerprint id
+- MBID membership is decided after the full replay, so mappings that arrive days after their fingerprints still land in the `.cki`/`.ckm`
+- Spools decoded fingerprints beside `--output` (roughly the final `.ckd` size on disk) so first-`Ctrl+C` graceful stops can resume with the same command; the spool and progress file are removed on success
+- RAM: replay state (track gid, track→mbid, fingerprint→track, acoustid dedup) is held in memory — order of 10–20 GB at the full 92.6M-fingerprint corpus. Final assembly additionally buffers the whole dataset in the libchroma builders until they finish, approaching the output size (~340 GB of `.ckd` payload at full scale), so full-corpus builds need a very-high-memory machine; `--end-date`-bounded builds scale roughly linearly
+- Reference: a 1.6M-fingerprint `.cki` built from 2011-08 archive data measured 6.14 B/posting with recall@1 87.6% on held-out duplicate submissions
+
+`chromaforge sync`
+
+- Applies daily AcoustID archive deltas (~60 MB/day) to an existing CKAF dataset built by `build-ckaf`, in place
+- Tracks progress in `<prefix>.sync-progress.json` (`last_synced_day` plus the artifact `generation`, see refresh below); the first run starts from the source date `build-ckaf` stamped into the `.ckd` header
+- New fingerprints are appended to the `.ckd`/`.ckm` overflow regions, with `.cki` postings (same stride-8 sampling as the build) when their track has an enabled MBID
+- When a `track_mbid` delta maps a previously-unmapped track, the track's existing fingerprints are promoted: they gain `.ckm` mappings and `.cki` postings from their values already stored in the `.ckd`
+- Duplicate submissions merge a missing duration into the recorded fingerprint (via an overflow record that shadows the main one), mirroring the build's dedup rule
+- CKAF files carry a single overflow region, so sync keeps an append-only journal (`<prefix>.sync-journal`) of everything added since the last compaction and rewrites the region from it each run; the journal and progress file also make re-running a day a no-op
+- Warns when the overflow region exceeds 10% of the main records; `--compact` folds the overflow into fresh main files instead (rebuilding the `.cki` so it keeps covering only MBID-mapped fingerprints) and resets the journal
+- **Serving-node mode** (`--serving`, auto-detected when `<prefix>.ckd` is absent): updates a `.cki`/`.ckm`-only copy. New MBID-mapped fingerprints get postings and mappings appended using values straight from the day files; promotions of fingerprints whose values live only in the canonical `.ckd` — and duration backfills of `.ckd` main records — are skipped and logged as deferred counts (`sync deferred to next refresh: promotions=… duration_backfills=…`) so drift stays visible. Requires the `.sync-progress.json` deployed alongside the artifacts; `--compact` is unavailable
+- RAM: rebuilds fingerprint→track / track→MBID state by scanning the `.ckm` each run — order of 10 GB at the full 92.6M-fingerprint corpus
+- The dataset files must be local paths; serving-node mode is how a node avoids holding the `.ckd`
+
+`chromaforge refresh`
+
+- Re-baselines a dataset on a machine that holds the canonical `.ckd`: applies every archive day since the dataset's `last_synced_day` like a full sync — including all promotions the serving nodes deferred, with fingerprint values read from the local `.ckd` — then always compacts into fresh main files and rebuilds the mapped-only `.cki`
+- Writes `<prefix>.sync-progress.json` with a **new artifact generation** (a UUID). The sync journal records the generation it was created under; when a serving node's next sync sees a different generation in the progress file, it knows a refresh replaced the files underneath its journal and discards the journal instead of replaying stale overflow onto the fresh artifacts
+- Uploading/deploying the artifacts is the operator's job (`aws s3 cp`, `rclone`, `rsync` — see the runbook below); chromaforge deliberately contains no object-storage client
+- RAM: the `.ckm` state scan (~10 GB at full corpus) plus the pending overflow content (every fingerprint added since the last refresh, with decoded values) held in memory during the rewrite — size the throwaway VM for roughly the interval's delta volume on top of the scan
+- Interruptible like sync: first `Ctrl+C` stops after the current day and saves progress; re-running continues
+
+### Two-tier operation without a permanent full-dataset machine
+
+No permanent machine holds the `.ckd` (~340 GB at full corpus). The serving
+node keeps only `.cki` + `.ckm` (~41 GB); the canonical `.ckd` lives in
+S3-compatible storage and is only materialized on a throwaway VM for the
+monthly refresh.
+
+Daily, on the serving node (cron):
+
+```bash
+chromaforge sync --serving --dataset /data/chromakopia
+```
+
+Monthly, on a throwaway VM with ~400 GB scratch disk:
+
+```bash
+# 1. Materialize the canonical dataset (progress file included)
+rclone copy s3:chromakopia/dataset/ /mnt/scratch/ \
+  --include "chromakopia.ckd" --include "chromakopia.cki" \
+  --include "chromakopia.ckm" --include "chromakopia.sync-progress.json"
+
+# 2. Refresh: catch up all days, fold in deferred promotions, compact,
+#    rotate the artifact generation
+chromaforge refresh --dataset /mnt/scratch/chromakopia
+
+# 3. Canonical copy back to object storage
+rclone copy /mnt/scratch/ s3:chromakopia/dataset/ \
+  --include "chromakopia.ckd" --include "chromakopia.cki" \
+  --include "chromakopia.ckm" --include "chromakopia.sync-progress.json"
+
+# 4. Deploy the serving artifact set — the progress file MUST travel with
+#    the .cki/.ckm (its generation reconciles the serving node's state).
+#    Stop the serving node's sync cron/timer for the swap.
+rsync -av /mnt/scratch/chromakopia.cki /mnt/scratch/chromakopia.ckm \
+  /mnt/scratch/chromakopia.sync-progress.json node-a:/data/
+
+# 5. Discard the VM
+```
+
+Notes:
+
+- The serving node's stale `<prefix>.sync-journal` does not need manual
+  cleanup: the next `sync --serving` sees the new generation in the deployed
+  progress file and discards the journal itself. Deleting it during the swap
+  is also fine.
+- The first deployment works the same way: run `refresh` on the build
+  machine right after `build-ckaf` (it writes the initial progress file even
+  when no archive days are pending), then ship the artifact set.
+- Days that land in the archive between step 2 and the serving node's next
+  sync are not lost: the deployed progress file says which day the artifacts
+  cover, and the node re-syncs everything after it.
+
 `chromaforge validate`
 
 - Verifies the final tables and indexes exist

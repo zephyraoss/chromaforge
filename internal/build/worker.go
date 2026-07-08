@@ -3,6 +3,7 @@ package build
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -17,13 +18,16 @@ const (
 const (
 	createSeenAcoustIDsTempTable = `
 CREATE TEMP TABLE IF NOT EXISTS seen_acoustids (
-	acoustid TEXT PRIMARY KEY
+	acoustid TEXT PRIMARY KEY,
+	fingerprint_id INTEGER NOT NULL
 ) WITHOUT ROWID
 `
 	seedSeenAcoustIDsTempTable = `
-INSERT OR IGNORE INTO temp.seen_acoustids(acoustid)
-SELECT acoustid FROM main.fingerprints
+INSERT OR IGNORE INTO temp.seen_acoustids(acoustid, fingerprint_id)
+SELECT acoustid, id FROM main.fingerprints
 `
+	lookupSeenAcoustIDSQL = `SELECT fingerprint_id FROM temp.seen_acoustids WHERE acoustid = ?`
+	markSeenAcoustIDSQL   = `INSERT INTO temp.seen_acoustids(acoustid, fingerprint_id) VALUES (?, ?)`
 )
 
 type Record struct {
@@ -40,13 +44,15 @@ type SubFP struct {
 
 type writeSession struct {
 	conn       *sql.Conn
-	seenStmt   *sql.Stmt
+	lookupStmt *sql.Stmt
+	markStmt   *sql.Stmt
 	updateStmt *sql.Stmt
 }
 
 type batchWriter struct {
 	conn       *sql.Conn
-	seenStmt   *sql.Stmt
+	lookupStmt *sql.Stmt
+	markStmt   *sql.Stmt
 	updateStmt *sql.Stmt
 	fpStmt     *sql.Stmt
 	committed  bool
@@ -70,21 +76,29 @@ func newWriteSession(ctx context.Context, db *sql.DB) (*writeSession, error) {
 		_ = conn.Close()
 		return nil, err
 	}
-	seenStmt, err := conn.PrepareContext(ctx, `INSERT OR IGNORE INTO temp.seen_acoustids(acoustid) VALUES (?)`)
+	lookupStmt, err := conn.PrepareContext(ctx, lookupSeenAcoustIDSQL)
 	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	markStmt, err := conn.PrepareContext(ctx, markSeenAcoustIDSQL)
+	if err != nil {
+		_ = lookupStmt.Close()
 		_ = conn.Close()
 		return nil, err
 	}
 	updateStmt, err := conn.PrepareContext(ctx, metadataMergeUpdateSQL)
 	if err != nil {
-		_ = seenStmt.Close()
+		_ = markStmt.Close()
+		_ = lookupStmt.Close()
 		_ = conn.Close()
 		return nil, err
 	}
 
 	return &writeSession{
 		conn:       conn,
-		seenStmt:   seenStmt,
+		lookupStmt: lookupStmt,
+		markStmt:   markStmt,
 		updateStmt: updateStmt,
 	}, nil
 }
@@ -105,7 +119,8 @@ VALUES (?, ?, ?)
 
 	return &batchWriter{
 		conn:       s.conn,
-		seenStmt:   s.seenStmt,
+		lookupStmt: s.lookupStmt,
+		markStmt:   s.markStmt,
 		updateStmt: s.updateStmt,
 		fpStmt:     fpStmt,
 	}, nil
@@ -113,8 +128,13 @@ VALUES (?, ?, ?)
 
 func (s *writeSession) Close() error {
 	var firstErr error
-	if s.seenStmt != nil {
-		if err := s.seenStmt.Close(); err != nil && firstErr == nil {
+	if s.lookupStmt != nil {
+		if err := s.lookupStmt.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if s.markStmt != nil {
+		if err := s.markStmt.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -135,19 +155,16 @@ func (w *batchWriter) InsertBatch(ctx context.Context, batch []Record) (int64, i
 	var insertedFPs int64
 	var insertedSubs int64
 	for _, r := range batch {
-		seenRes, err := w.seenStmt.ExecContext(ctx, r.AcoustID)
-		if err != nil {
-			return insertedFPs, insertedSubs, err
-		}
-		seenRows, err := seenRes.RowsAffected()
-		if err != nil {
-			return insertedFPs, insertedSubs, err
-		}
-		if seenRows == 0 {
-			if _, err := w.updateStmt.ExecContext(ctx, metadataMergeArgs(r)...); err != nil {
+		var existingID int64
+		err := w.lookupStmt.QueryRowContext(ctx, r.AcoustID).Scan(&existingID)
+		if err == nil {
+			if _, err := w.updateStmt.ExecContext(ctx, metadataMergeArgs(r, existingID)...); err != nil {
 				return insertedFPs, insertedSubs, err
 			}
 			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return insertedFPs, insertedSubs, err
 		}
 		res, err := w.fpStmt.ExecContext(ctx, r.AcoustID, nullIfEmpty(r.MBID), r.Duration)
 		if err != nil {
@@ -155,6 +172,9 @@ func (w *batchWriter) InsertBatch(ctx context.Context, batch []Record) (int64, i
 		}
 		fpID, err := res.LastInsertId()
 		if err != nil {
+			return insertedFPs, insertedSubs, err
+		}
+		if _, err := w.markStmt.ExecContext(ctx, r.AcoustID, fpID); err != nil {
 			return insertedFPs, insertedSubs, err
 		}
 		insertedFPs++
