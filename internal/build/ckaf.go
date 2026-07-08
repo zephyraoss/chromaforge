@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	chroma "github.com/zephyraoss/libchroma"
+	chroma "github.com/zephyraoss/libchroma/v2"
 
 	"github.com/zephyraoss/chromaforge/internal/dump"
 )

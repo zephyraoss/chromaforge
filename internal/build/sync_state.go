@@ -2,7 +2,7 @@ package build
 
 import (
 	"github.com/google/uuid"
-	chroma "github.com/zephyraoss/libchroma"
+	chroma "github.com/zephyraoss/libchroma/v2"
 )
 
 type syncState struct {
