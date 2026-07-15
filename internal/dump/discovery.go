@@ -57,9 +57,18 @@ func (d DayFiles) OrderedFiles() []ArchiveFile {
 	return out
 }
 
+func joinURL(baseURL string, parts ...string) string {
+	base, query, _ := strings.Cut(baseURL, "?")
+	base = strings.TrimSuffix(base, "/")
+	url := base + "/" + strings.Join(parts, "/")
+	if query != "" {
+		url += "?" + query
+	}
+	return url
+}
+
 func DiscoverArchive(ctx context.Context, client *http.Client, baseURL string, startYear int, endDate string) ([]DayFiles, error) {
-	baseURL = strings.TrimSuffix(baseURL, "/")
-	years, err := fetchIndex(ctx, client, baseURL+"/index.json")
+	years, err := fetchIndex(ctx, client, joinURL(baseURL, "index.json"))
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +106,7 @@ func DiscoverArchive(ctx context.Context, client *http.Client, baseURL string, s
 			continue
 		}
 		log.Printf("archive discovery year=%d: fetching month index", year)
-		months, err := fetchIndex(ctx, client, fmt.Sprintf("%s/%04d/index.json", baseURL, year))
+		months, err := fetchIndex(ctx, client, joinURL(baseURL, fmt.Sprintf("%04d", year), "index.json"))
 		if err != nil {
 			return nil, err
 		}
@@ -126,7 +135,7 @@ func DiscoverArchive(ctx context.Context, client *http.Client, baseURL string, s
 					Size: entry.Size,
 					Type: ft,
 					Day:  day,
-					URL:  fmt.Sprintf("%s/%04d/%s/%s", baseURL, year, result.monthName, path.Base(entry.Name)),
+					URL:  joinURL(baseURL, fmt.Sprintf("%04d", year), result.monthName, path.Base(entry.Name)),
 				}
 				days[key] = df
 			}
@@ -172,7 +181,7 @@ func fetchMonthIndexes(ctx context.Context, client *http.Client, baseURL string,
 			defer wg.Done()
 			for job := range jobs {
 				log.Printf("archive discovery year=%d month=%s: fetching file index", year, job.monthName)
-				files, err := fetchIndex(ctx, client, fmt.Sprintf("%s/%04d/%s/index.json", baseURL, year, job.monthName))
+				files, err := fetchIndex(ctx, client, joinURL(baseURL, fmt.Sprintf("%04d", year), job.monthName, "index.json"))
 				if err == nil {
 					log.Printf("archive discovery year=%d month=%s: files=%d", year, job.monthName, len(files))
 				}

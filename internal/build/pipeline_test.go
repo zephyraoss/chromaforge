@@ -97,7 +97,7 @@ func TestReplayDayAndValidate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := ReplayDay(ctx, writer, staticDownloader{}, cfg, day, state, stats, txModeBeginExclusive, 0); err != nil {
+	if err := ReplayDay(ctx, writer, staticDownloader{}, cfg, day, state, stats, txModeBeginExclusive, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := writer.Close(); err != nil {
@@ -180,7 +180,7 @@ func TestReplayDayResumeDedupeUsesTempSeenTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ReplayDay(ctx, writer, staticDownloader{}, cfg, dayOne, state, stats, txModeBeginExclusive, 0); err != nil {
+	if err := ReplayDay(ctx, writer, staticDownloader{}, cfg, dayOne, state, stats, txModeBeginExclusive, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := writer.Close(); err != nil {
@@ -191,7 +191,7 @@ func TestReplayDayResumeDedupeUsesTempSeenTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ReplayDay(ctx, writer, staticDownloader{}, cfg, dayTwo, state, stats, txModeBeginExclusive, 0); err != nil {
+	if err := ReplayDay(ctx, writer, staticDownloader{}, cfg, dayTwo, state, stats, txModeBeginExclusive, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := writer.Close(); err != nil {

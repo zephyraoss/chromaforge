@@ -94,19 +94,18 @@ type Stats struct {
 	insertedSubFPs       atomic.Int64
 }
 
-func (s *Stats) maybeLogProgress(totalEstimate int64) {
+func (s *Stats) maybeLogProgress(tracker *progressTracker) {
 	processed := s.processed.Load()
 	if processed == 0 || processed%progressEvery != 0 {
 		return
 	}
 	elapsed := time.Since(s.start)
 	rate := float64(processed) / elapsed.Seconds()
-	remaining := "unknown"
-	if totalEstimate > 0 && processed < totalEstimate && rate > 0 {
-		eta := time.Duration(float64(totalEstimate-processed)/rate) * time.Second
-		remaining = eta.String()
+	progressDetail := "progress=unknown eta=unknown"
+	if percent, eta, ok := tracker.snapshot(time.Now()); ok {
+		progressDetail = fmt.Sprintf("progress=%.1f%% eta≈%s", percent, formatETA(eta))
 	}
-	log.Printf("processed=%d skipped=%d elapsed=%s rate=%.0f records/sec eta=%s", processed, s.skipped.Load(), elapsed.Round(time.Second), rate, remaining)
+	log.Printf("processed=%d skipped=%d elapsed=%s rate=%.0f records/sec %s", processed, s.skipped.Load(), elapsed.Round(time.Second), rate, progressDetail)
 }
 
 func (s *Stats) overBadRecordThreshold() bool {
@@ -121,9 +120,9 @@ func (s *Stats) overBadRecordThreshold() bool {
 	return float64(skipped)/float64(processed) > maxBadRecordPct
 }
 
-func ReplayDay(ctx context.Context, writer *writeSession, client DownloadClient, cfg Config, day dump.DayFiles, state *ReplayState, stats *Stats, mode txMode, totalEstimate int64) error {
+func ReplayDay(ctx context.Context, writer *writeSession, client DownloadClient, cfg Config, day dump.DayFiles, state *ReplayState, stats *Stats, mode txMode, tracker *progressTracker) error {
 	for _, file := range day.OrderedFiles() {
-		if file.Type == dump.FileTypeTrackMeta {
+		if file.Type == dump.FileTypeTrackMeta || file.Type == dump.FileTypeMeta {
 			continue
 		}
 		localPath := filepath.Join(cfg.CacheDir, day.Day.Format("2006-01"), file.Name)
@@ -132,7 +131,7 @@ func ReplayDay(ctx context.Context, writer *writeSession, client DownloadClient,
 		}
 		switch file.Type {
 		case dump.FileTypeTrack:
-			if err := dump.ScanGzipLines(ctx, localPath, func(line []byte) error {
+			if err := dump.ScanGzipLinesCounted(ctx, localPath, tracker.CurrentFileBytes(), func(line []byte) error {
 				var v dump.TrackUpdate
 				if err := dump.DecodeJSONLine(line, &v); err != nil {
 					return err
@@ -143,7 +142,7 @@ func ReplayDay(ctx context.Context, writer *writeSession, client DownloadClient,
 				return err
 			}
 		case dump.FileTypeTrackMBID:
-			if err := dump.ScanGzipLines(ctx, localPath, func(line []byte) error {
+			if err := dump.ScanGzipLinesCounted(ctx, localPath, tracker.CurrentFileBytes(), func(line []byte) error {
 				var v dump.TrackMBIDUpdate
 				if err := dump.DecodeJSONLine(line, &v); err != nil {
 					return err
@@ -154,7 +153,7 @@ func ReplayDay(ctx context.Context, writer *writeSession, client DownloadClient,
 				return err
 			}
 		case dump.FileTypeTrackFingerprint:
-			if err := dump.ScanGzipLines(ctx, localPath, func(line []byte) error {
+			if err := dump.ScanGzipLinesCounted(ctx, localPath, tracker.CurrentFileBytes(), func(line []byte) error {
 				var v dump.TrackFingerprintUpdate
 				if err := dump.DecodeJSONLine(line, &v); err != nil {
 					return err
@@ -165,12 +164,11 @@ func ReplayDay(ctx context.Context, writer *writeSession, client DownloadClient,
 				return err
 			}
 		case dump.FileTypeFingerprint:
-			if err := replayFingerprintFile(ctx, writer, localPath, state, stats, cfg, mode, totalEstimate); err != nil {
+			if err := replayFingerprintFile(ctx, writer, localPath, state, stats, cfg, mode, tracker); err != nil {
 				return err
 			}
-		case dump.FileTypeMeta:
-			continue
 		}
+		tracker.FileCompleted(file.Size)
 	}
 	return nil
 }
@@ -229,7 +227,7 @@ type DownloadClient interface {
 	Ensure(ctx context.Context, file dump.ArchiveFile, dst string) error
 }
 
-func replayFingerprintFile(ctx context.Context, writer *writeSession, path string, state *ReplayState, stats *Stats, cfg Config, mode txMode, totalEstimate int64) error {
+func replayFingerprintFile(ctx context.Context, writer *writeSession, path string, state *ReplayState, stats *Stats, cfg Config, mode txMode, tracker *progressTracker) error {
 	rawLines := make(chan []byte, rawLineBuffer)
 	records := make(chan Record, cfg.BatchSize*recordBatchBuffer)
 	batches := make(chan []Record, recordBatchBuffer)
@@ -244,7 +242,7 @@ func replayFingerprintFile(ctx context.Context, writer *writeSession, path strin
 
 	go func() {
 		defer close(rawLines)
-		if err := dump.ScanGzipLines(ctx, path, func(line []byte) error {
+		if err := dump.ScanGzipLinesCounted(ctx, path, tracker.CurrentFileBytes(), func(line []byte) error {
 			select {
 			case rawLines <- line:
 				return nil
@@ -266,7 +264,7 @@ func replayFingerprintFile(ctx context.Context, writer *writeSession, path strin
 				if err := json.Unmarshal(line, &payload); err != nil {
 					stats.skipped.Add(1)
 					stats.processed.Add(1)
-					stats.maybeLogProgress(totalEstimate)
+					stats.maybeLogProgress(tracker)
 					if stats.overBadRecordThreshold() {
 						reportErr(fmt.Errorf("malformed record threshold exceeded"))
 						return
@@ -277,7 +275,7 @@ func replayFingerprintFile(ctx context.Context, writer *writeSession, path strin
 				if err != nil {
 					stats.skipped.Add(1)
 					stats.processed.Add(1)
-					stats.maybeLogProgress(totalEstimate)
+					stats.maybeLogProgress(tracker)
 					if stats.overBadRecordThreshold() {
 						reportErr(fmt.Errorf("malformed record threshold exceeded"))
 						return
@@ -288,7 +286,7 @@ func replayFingerprintFile(ctx context.Context, writer *writeSession, path strin
 				if !ok {
 					stats.skipped.Add(1)
 					stats.processed.Add(1)
-					stats.maybeLogProgress(totalEstimate)
+					stats.maybeLogProgress(tracker)
 					if stats.overBadRecordThreshold() {
 						reportErr(fmt.Errorf("malformed record threshold exceeded"))
 						return
@@ -308,7 +306,7 @@ func replayFingerprintFile(ctx context.Context, writer *writeSession, path strin
 					return
 				}
 				stats.processed.Add(1)
-				stats.maybeLogProgress(totalEstimate)
+				stats.maybeLogProgress(tracker)
 			}
 		}()
 	}

@@ -1,6 +1,7 @@
 package build
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -209,6 +210,56 @@ func TestRunCKAFDaysBuildsDataset(t *testing.T) {
 	if fileExists(ckafProgressPath(prefix)) {
 		t.Fatal("progress file should be removed after a successful build")
 	}
+}
+
+func readCKAFMaskedFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) < 0x38 {
+		t.Fatalf("file %s too small for header: %d bytes", path, len(data))
+	}
+	for i := 0x18; i < 0x20; i++ {
+		data[i] = 0
+	}
+	for i := 0x28; i < 0x38; i++ {
+		data[i] = 0
+	}
+	return data
+}
+
+func TestRunCKAFDaysAssemblyConcurrencyEquivalence(t *testing.T) {
+	cacheDir := t.TempDir()
+	days := makeCKAFTestDays(t, cacheDir)
+
+	buildWith := func(concurrency int) string {
+		t.Helper()
+		prefix := filepath.Join(t.TempDir(), "dataset")
+		cfg := CKAFConfig{
+			OutputPrefix:        prefix,
+			CacheDir:            cacheDir,
+			DecodeWorkers:       2,
+			AssemblyConcurrency: concurrency,
+		}
+		if err := runCKAFDays(context.Background(), cfg, staticDownloader{}, days); err != nil {
+			t.Fatal(err)
+		}
+		return prefix
+	}
+
+	serialPrefix := buildWith(1)
+	parallelPrefix := buildWith(8)
+
+	for _, suffix := range []string{".ckd", ".cki", ".ckm"} {
+		serial := readCKAFMaskedFile(t, serialPrefix+suffix)
+		parallel := readCKAFMaskedFile(t, parallelPrefix+suffix)
+		if !bytes.Equal(serial, parallel) {
+			t.Errorf("parallel-assembled %s differs from serially-assembled %s", suffix, suffix)
+		}
+	}
+	assertCKAFDataset(t, parallelPrefix)
 }
 
 func TestRunCKAFDaysGracefulStopAndResume(t *testing.T) {

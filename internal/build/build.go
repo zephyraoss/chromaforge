@@ -186,12 +186,7 @@ func Run(ctx context.Context, cfg Config) error {
 		}
 	}
 	remainingDays := days[startIdx:]
-	var totalEstimate int64
-	for _, day := range remainingDays {
-		if file, ok := day.Files[dump.FileTypeFingerprint]; ok {
-			totalEstimate += max(1, file.Size/100)
-		}
-	}
+	tracker := newProgressTracker(totalReplayableBytes(remainingDays), time.Now())
 
 	stats := &Stats{start: start}
 	if len(remainingDays) > 0 {
@@ -230,7 +225,7 @@ func Run(ctx context.Context, cfg Config) error {
 			}
 
 			log.Printf("replaying day %s", day.Day.Format("2006-01-02"))
-			if err := ReplayDay(ctx, writeSession, pdl, cfg, day, state, stats, mode, totalEstimate); err != nil {
+			if err := ReplayDay(ctx, writeSession, pdl, cfg, day, state, stats, mode, tracker); err != nil {
 				return err
 			}
 			if err := saveBuildProgress(cfg.DBPath, day.Day); err != nil {
@@ -360,13 +355,6 @@ func stopRequested(ch <-chan struct{}) bool {
 	default:
 		return false
 	}
-}
-
-func max(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func indexStageStatus(ctx context.Context, db *sql.DB) (bool, bool, error) {

@@ -28,17 +28,18 @@ const (
 )
 
 type CKAFConfig struct {
-	OutputPrefix    string
-	SpillDir        string
-	CacheDir        string
-	BaseURL         string
-	GoMaxProcs      int
-	DecodeWorkers   int
-	StartYear       int
-	EndDate         string
-	DownloadWorkers int
-	HTTPClient      *http.Client
-	GracefulStop    <-chan struct{}
+	OutputPrefix        string
+	SpillDir            string
+	CacheDir            string
+	BaseURL             string
+	GoMaxProcs          int
+	DecodeWorkers       int
+	AssemblyConcurrency int
+	StartYear           int
+	EndDate             string
+	DownloadWorkers     int
+	HTTPClient          *http.Client
+	GracefulStop        <-chan struct{}
 }
 
 func (s *ReplayState) FingerprintTrack(id int64) (trackID int64, mbid string, ok bool) {
@@ -114,6 +115,9 @@ func runCKAFDays(ctx context.Context, cfg CKAFConfig, client DownloadClient, day
 	start := time.Now()
 	if cfg.DecodeWorkers <= 0 {
 		cfg.DecodeWorkers = runtime.GOMAXPROCS(0)
+	}
+	if cfg.AssemblyConcurrency <= 0 {
+		cfg.AssemblyConcurrency = runtime.GOMAXPROCS(0)
 	}
 	if cfg.DownloadWorkers <= 0 {
 		cfg.DownloadWorkers = 4
@@ -199,12 +203,7 @@ func runCKAFDays(ctx context.Context, cfg CKAFConfig, client DownloadClient, day
 	defer spool.Close()
 
 	remainingDays := days[startIdx:]
-	var totalEstimate int64
-	for _, day := range remainingDays {
-		if file, ok := day.Files[dump.FileTypeFingerprint]; ok {
-			totalEstimate += max(1, file.Size/100)
-		}
-	}
+	tracker := newProgressTracker(totalReplayableBytes(remainingDays), time.Now())
 
 	if len(remainingDays) > 0 {
 		prefetchCtx, cancelPrefetch := context.WithCancel(ctx)
@@ -230,7 +229,7 @@ func runCKAFDays(ctx context.Context, cfg CKAFConfig, client DownloadClient, day
 			}
 
 			log.Printf("replaying day %s", day.Day.Format("2006-01-02"))
-			if err := replayCKAFDay(ctx, spool, dedup, pdl, cfg, stateCfg, day, state, stats, totalEstimate); err != nil {
+			if err := replayCKAFDay(ctx, spool, dedup, pdl, cfg, stateCfg, day, state, stats, tracker); err != nil {
 				return err
 			}
 			if err := spool.Sync(); err != nil {
@@ -256,7 +255,7 @@ func runCKAFDays(ctx context.Context, cfg CKAFConfig, client DownloadClient, day
 		return err
 	}
 
-	summary, err := assembleCKAF(ctx, cfg.OutputPrefix, cfg.SpillDir, state, spoolPath, days[len(days)-1].Day)
+	summary, err := assembleCKAF(ctx, cfg.OutputPrefix, cfg.SpillDir, cfg.AssemblyConcurrency, state, spoolPath, days[len(days)-1].Day)
 	if err != nil {
 		return err
 	}
@@ -285,9 +284,17 @@ func runCKAFDays(ctx context.Context, cfg CKAFConfig, client DownloadClient, day
 	return nil
 }
 
-func replayCKAFDay(ctx context.Context, spool *ckafSpoolWriter, dedup *ckafDedup, client DownloadClient, cfg CKAFConfig, stateCfg Config, day dump.DayFiles, state *ReplayState, stats *Stats, totalEstimate int64) error {
+func replayCKAFDay(ctx context.Context, spool *ckafSpoolWriter, dedup *ckafDedup, client DownloadClient, cfg CKAFConfig, stateCfg Config, day dump.DayFiles, state *ReplayState, stats *Stats, tracker *progressTracker) error {
 	if err := ReplayStateDay(ctx, client, stateCfg, day, state); err != nil {
 		return err
+	}
+	for _, ft := range replayedFileTypes {
+		if ft == dump.FileTypeFingerprint {
+			continue
+		}
+		if file, ok := day.Files[ft]; ok {
+			tracker.FileCompleted(file.Size)
+		}
 	}
 	file, ok := day.Files[dump.FileTypeFingerprint]
 	if !ok {
@@ -297,7 +304,11 @@ func replayCKAFDay(ctx context.Context, spool *ckafSpoolWriter, dedup *ckafDedup
 	if err := client.Ensure(ctx, file, localPath); err != nil {
 		return err
 	}
-	return spoolCKAFFingerprintFile(ctx, spool, dedup, localPath, state, stats, cfg.DecodeWorkers, totalEstimate)
+	if err := spoolCKAFFingerprintFile(ctx, spool, dedup, localPath, state, stats, cfg.DecodeWorkers, tracker); err != nil {
+		return err
+	}
+	tracker.FileCompleted(file.Size)
+	return nil
 }
 
 type ckafDecoded struct {
@@ -308,7 +319,7 @@ type ckafDecoded struct {
 	blob       []byte
 }
 
-func spoolCKAFFingerprintFile(ctx context.Context, spool *ckafSpoolWriter, dedup *ckafDedup, path string, state *ReplayState, stats *Stats, decodeWorkers int, totalEstimate int64) error {
+func spoolCKAFFingerprintFile(ctx context.Context, spool *ckafSpoolWriter, dedup *ckafDedup, path string, state *ReplayState, stats *Stats, decodeWorkers int, tracker *progressTracker) error {
 	rawLines := make(chan []byte, rawLineBuffer)
 	records := make(chan ckafDecoded, rawLineBuffer)
 	errCh := make(chan error, 1)
@@ -322,7 +333,7 @@ func spoolCKAFFingerprintFile(ctx context.Context, spool *ckafSpoolWriter, dedup
 
 	go func() {
 		defer close(rawLines)
-		if err := dump.ScanGzipLines(ctx, path, func(line []byte) error {
+		if err := dump.ScanGzipLinesCounted(ctx, path, tracker.CurrentFileBytes(), func(line []byte) error {
 			select {
 			case rawLines <- line:
 				return nil
@@ -344,14 +355,14 @@ func spoolCKAFFingerprintFile(ctx context.Context, spool *ckafSpoolWriter, dedup
 				stats.processed.Add(1)
 				if !ok {
 					stats.skipped.Add(1)
-					stats.maybeLogProgress(totalEstimate)
+					stats.maybeLogProgress(tracker)
 					if stats.overBadRecordThreshold() {
 						reportErr(fmt.Errorf("malformed record threshold exceeded"))
 						return
 					}
 					continue
 				}
-				stats.maybeLogProgress(totalEstimate)
+				stats.maybeLogProgress(tracker)
 				select {
 				case records <- rec:
 				case <-ctx.Done():
@@ -456,9 +467,13 @@ func (s ckafSummary) bytesPerPosting() float64 {
 	return float64(s.ckiBytes) / float64(s.postings)
 }
 
-func assembleCKAF(ctx context.Context, outputPrefix, spillDir string, state *ReplayState, spoolPath string, sourceDate time.Time) (ckafSummary, error) {
-	log.Printf("ckaf assembly started spill_dir=%s", spillDir)
+func assembleCKAF(ctx context.Context, outputPrefix, spillDir string, concurrency int, state *ReplayState, spoolPath string, sourceDate time.Time) (ckafSummary, error) {
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	log.Printf("ckaf assembly started spill_dir=%s concurrency=%d", spillDir, concurrency)
 	assemblyStart := time.Now()
+	stageStart := time.Now()
 
 	mergedDurations := map[uint32]uint32{}
 	if err := scanCKAFSpool(spoolPath, false, func(rec ckafSpoolRecord) error {
@@ -469,8 +484,9 @@ func assembleCKAF(ctx context.Context, outputPrefix, spillDir string, state *Rep
 	}); err != nil {
 		return ckafSummary{}, err
 	}
+	log.Printf("ckaf assembly stage=merged-durations merges=%d elapsed=%s", len(mergedDurations), time.Since(stageStart).Round(time.Second))
 
-	spillOpts := chroma.BuilderOptions{SpillDir: spillDir}
+	spillOpts := chroma.BuilderOptions{SpillDir: spillDir, Concurrency: concurrency, Logf: log.Printf}
 	ds, err := chroma.NewDataStoreBuilderWithOptions(outputPrefix+".ckd", chroma.CompressPFOR, spillOpts)
 	if err != nil {
 		return ckafSummary{}, err
@@ -492,71 +508,64 @@ func assembleCKAF(ctx context.Context, outputPrefix, spillDir string, state *Rep
 	pi.SetTuningConfig(chroma.TuningConfig{Stride: ckiStride, QBits: ckiQBits, SkipInterval: ckiSkipInterval})
 
 	var summary ckafSummary
-	if err := scanCKAFSpool(spoolPath, true, func(rec ckafSpoolRecord) error {
-		if rec.Kind != ckafSpoolKindFingerprint {
-			return nil
-		}
+	stageStart = time.Now()
+	apply := func(res ckafAssembled) error {
 		if summary.fingerprints%1_000_000 == 0 {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 		}
-		values, err := chroma.DecompressFingerprint(rec.Blob, int(rec.RawCount))
-		if err != nil {
-			return fmt.Errorf("ckaf spool fingerprint %d: %w", rec.ID, err)
+		if res.fatalErr != nil {
+			return res.fatalErr
 		}
-		durationMs := rec.DurationMs
-		if merged, ok := mergedDurations[rec.ID]; ok {
-			durationMs = merged
+		addErr := res.compressErr
+		if addErr == nil {
+			addErr = ds.AddPrecompressed(res.id, res.durationMs, res.compressed, res.rawCount)
 		}
-		if err := ds.Add(rec.ID, durationMs, values); err != nil {
-			log.Printf("ckaf assembly skipping oversized fingerprint %d: %v", rec.ID, err)
+		if addErr != nil {
+			log.Printf("ckaf assembly skipping oversized fingerprint %d: %v", res.id, addErr)
 			summary.oversized++
 			return nil
 		}
 		summary.fingerprints++
-
-		trackID, mbid, ok := state.FingerprintTrack(int64(rec.ID))
-		var trackID32 uint32
-		if ok && trackID > 0 && trackID <= math.MaxUint32 {
-			trackID32 = uint32(trackID)
+		if res.invalidMBID {
+			summary.invalidMBIDs++
 		}
-		mbidUUID := uuid.Nil
-		if mbid != "" {
-			parsed, err := uuid.Parse(mbid)
-			if err != nil {
-				summary.invalidMBIDs++
-			} else {
-				mbidUUID = parsed
-			}
-		}
-		if err := mm.Add(rec.ID, mbidUUID, trackID32, nil); err != nil {
+		if err := mm.Add(res.id, res.mbid, res.trackID, nil); err != nil {
 			return err
 		}
-		if mbidUUID == uuid.Nil {
+		if res.mbid == uuid.Nil {
 			return nil
 		}
-
-		hashes, ordinals := sampleForPostingIndex(values)
-		if err := pi.Add(rec.ID, hashes, ordinals); err != nil {
+		if err := pi.Add(res.id, res.hashes, res.ordinals); err != nil {
 			return err
 		}
 		summary.mapped++
-		summary.postings += int64(len(hashes))
+		summary.postings += int64(len(res.hashes))
 		return nil
-	}); err != nil {
+	}
+	if err := runCKAFAssemblyPipeline(spoolPath, concurrency, state, mergedDurations, apply); err != nil {
 		return ckafSummary{}, err
 	}
+	log.Printf("ckaf assembly stage=spool-pass fingerprints=%d postings=%d elapsed=%s", summary.fingerprints, summary.postings, time.Since(stageStart).Round(time.Second))
 
+	stageStart = time.Now()
 	if err := ds.Finish(); err != nil {
 		return ckafSummary{}, fmt.Errorf("finish .ckd: %w", err)
 	}
+	log.Printf("ckaf assembly stage=finish-ckd elapsed=%s", time.Since(stageStart).Round(time.Second))
+
+	stageStart = time.Now()
 	if err := pi.Finish(); err != nil {
 		return ckafSummary{}, fmt.Errorf("finish .cki: %w", err)
 	}
+	log.Printf("ckaf assembly stage=finish-cki elapsed=%s", time.Since(stageStart).Round(time.Second))
+
+	stageStart = time.Now()
 	if err := mm.Finish(); err != nil {
 		return ckafSummary{}, fmt.Errorf("finish .ckm: %w", err)
 	}
+	log.Printf("ckaf assembly stage=finish-ckm elapsed=%s", time.Since(stageStart).Round(time.Second))
 
 	for suffix, dst := range map[string]*int64{".ckd": &summary.ckdBytes, ".cki": &summary.ckiBytes, ".ckm": &summary.ckmBytes} {
 		info, err := os.Stat(outputPrefix + suffix)
@@ -568,6 +577,114 @@ func assembleCKAF(ctx context.Context, outputPrefix, spillDir string, state *Rep
 
 	log.Printf("ckaf assembly completed dataset_id=%s elapsed=%s", datasetID, time.Since(assemblyStart).Round(time.Second))
 	return summary, nil
+}
+
+type ckafAssembled struct {
+	id          uint32
+	rawCount    uint16
+	durationMs  uint32
+	compressed  []byte
+	compressErr error
+	fatalErr    error
+	trackID     uint32
+	mbid        uuid.UUID
+	invalidMBID bool
+	hashes      []uint32
+	ordinals    []uint8
+}
+
+func assembleCKAFRecord(rec ckafSpoolRecord, state *ReplayState, mergedDurations map[uint32]uint32) ckafAssembled {
+	res := ckafAssembled{id: rec.ID, rawCount: rec.RawCount, durationMs: rec.DurationMs}
+	values, err := chroma.DecompressFingerprint(rec.Blob, int(rec.RawCount))
+	if err != nil {
+		res.fatalErr = fmt.Errorf("ckaf spool fingerprint %d: %w", rec.ID, err)
+		return res
+	}
+	if merged, ok := mergedDurations[rec.ID]; ok {
+		res.durationMs = merged
+	}
+	res.compressed, res.compressErr = chroma.CompressFingerprintPFOR(values)
+
+	trackID, mbid, ok := state.FingerprintTrack(int64(rec.ID))
+	if ok && trackID > 0 && trackID <= math.MaxUint32 {
+		res.trackID = uint32(trackID)
+	}
+	if mbid != "" {
+		parsed, err := uuid.Parse(mbid)
+		if err != nil {
+			res.invalidMBID = true
+		} else {
+			res.mbid = parsed
+		}
+	}
+	if res.mbid != uuid.Nil && res.compressErr == nil {
+		res.hashes, res.ordinals = sampleForPostingIndex(values)
+	}
+	return res
+}
+
+var errCKAFAssemblyAborted = errors.New("ckaf assembly aborted")
+
+func runCKAFAssemblyPipeline(spoolPath string, workers int, state *ReplayState, mergedDurations map[uint32]uint32, apply func(ckafAssembled) error) error {
+	if workers < 1 {
+		workers = 1
+	}
+	type job struct {
+		rec ckafSpoolRecord
+		out chan ckafAssembled
+	}
+	jobs := make(chan job)
+	pending := make(chan chan ckafAssembled, workers*64)
+	abort := make(chan struct{})
+	var abortOnce sync.Once
+	stop := func() { abortOnce.Do(func() { close(abort) }) }
+
+	var scanErr error
+	go func() {
+		defer close(pending)
+		defer close(jobs)
+		scanErr = scanCKAFSpool(spoolPath, true, func(rec ckafSpoolRecord) error {
+			if rec.Kind != ckafSpoolKindFingerprint {
+				return nil
+			}
+			out := make(chan ckafAssembled, 1)
+			select {
+			case jobs <- job{rec: rec, out: out}:
+			case <-abort:
+				return errCKAFAssemblyAborted
+			}
+			select {
+			case pending <- out:
+			case <-abort:
+				return errCKAFAssemblyAborted
+			}
+			return nil
+		})
+	}()
+
+	for i := 0; i < workers; i++ {
+		go func() {
+			for j := range jobs {
+				j.out <- assembleCKAFRecord(j.rec, state, mergedDurations)
+			}
+		}()
+	}
+
+	var applyErr error
+	for out := range pending {
+		res := <-out
+		if applyErr != nil {
+			continue
+		}
+		if err := apply(res); err != nil {
+			applyErr = err
+			stop()
+		}
+	}
+	if applyErr != nil {
+		return applyErr
+	}
+	return scanErr
 }
 
 func sampleForPostingIndex(values []uint32) ([]uint32, []uint8) {

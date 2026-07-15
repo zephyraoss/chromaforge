@@ -113,6 +113,7 @@ func newBuildCmd() *cobra.Command {
 	cmd.Flags().StringVar(&cfg.EndDate, "end-date", "", "Replay archive through this date (YYYY-MM-DD, defaults to latest available)")
 	cmd.Flags().StringVar(&cfg.CacheDir, "cache-dir", cfg.CacheDir, "Directory for downloaded archive files (defaults to a cache directory beside --db)")
 	cmd.Flags().StringVar(&cfg.TempDir, "temp-dir", cfg.TempDir, "Directory for SQLite temp files during index build (defaults under --cache-dir)")
+	cmd.Flags().StringVar(&cfg.BaseURL, "archive-url", cfg.BaseURL, "Base URL for the AcoustID archive; a mirror serving the same index.json layout works, including a blob container URL with a SAS query string")
 	cmd.Flags().IntVar(&cfg.DownloadWorkers, "download-workers", cfg.DownloadWorkers, "Background archive download workers")
 	cmd.Flags().Int64Var(&cfg.CacheSizeBytes, "cache-size", cfg.CacheSizeBytes, "SQLite replay/write page cache target in bytes; 0 keeps the phase default")
 	cmd.Flags().Int64Var(&cfg.MmapSizeBytes, "mmap-size", cfg.MmapSizeBytes, "SQLite replay/write mmap_size in bytes; 0 keeps the phase default")
@@ -153,8 +154,9 @@ RAM: replay state (track gid, track->mbid, fingerprint->track, acoustid
 dedup) is held in memory like the SQLite build — on the order of 10-20 GB
 for the full 92.6M-fingerprint corpus. Final assembly spills builder state
 to scratch files under --spill-dir, keeping only compact per-record tables
-in memory (~2-3 GB at full scale), so a full-corpus build fits in roughly
-16-32 GB of RAM. Disk: decoded fingerprints are spooled beside the output
+in memory (~3-6 GB at full scale with parallel assembly; lower
+--assembly-concurrency to shrink it), so a full-corpus build fits in
+roughly 16-32 GB of RAM. Disk: decoded fingerprints are spooled beside the output
 (roughly the final .ckd size) so an interrupted build can resume, and
 assembly needs scratch space under --spill-dir roughly the size of the
 final dataset — put it on NVMe.
@@ -173,10 +175,12 @@ progress beside the output prefix; a second Ctrl+C aborts immediately.`,
 	cmd.Flags().StringVar(&cfg.OutputPrefix, "output", cfg.OutputPrefix, "Output dataset path prefix (writes <prefix>.ckd, <prefix>.cki, <prefix>.ckm)")
 	cmd.Flags().IntVar(&cfg.GoMaxProcs, "gomaxprocs", cfg.GoMaxProcs, "Go scheduler CPU parallelism (defaults to runtime auto-detect)")
 	cmd.Flags().IntVar(&cfg.DecodeWorkers, "decode-workers", cfg.DecodeWorkers, "Parallel fingerprint decode workers (defaults to GOMAXPROCS)")
+	cmd.Flags().IntVar(&cfg.AssemblyConcurrency, "assembly-concurrency", cfg.AssemblyConcurrency, "Parallel workers for final dataset assembly (defaults to GOMAXPROCS)")
 	cmd.Flags().IntVar(&cfg.StartYear, "start-year", 0, "Replay archive from this year (defaults to earliest available)")
 	cmd.Flags().StringVar(&cfg.EndDate, "end-date", "", "Replay archive through this date (YYYY-MM-DD, defaults to latest available)")
 	cmd.Flags().StringVar(&cfg.CacheDir, "cache-dir", cfg.CacheDir, "Directory for downloaded archive files (defaults to a cache directory beside --output)")
 	cmd.Flags().StringVar(&cfg.SpillDir, "spill-dir", cfg.SpillDir, "Directory for assembly scratch files, needs roughly the final dataset size free (defaults to the directory of --output)")
+	cmd.Flags().StringVar(&cfg.BaseURL, "archive-url", cfg.BaseURL, "Base URL for the AcoustID archive; a mirror serving the same index.json layout works, including a blob container URL with a SAS query string")
 	cmd.Flags().IntVar(&cfg.DownloadWorkers, "download-workers", cfg.DownloadWorkers, "Background archive download workers")
 	_ = cmd.Flags().MarkHidden("start-year")
 	_ = cmd.Flags().MarkHidden("end-date")
@@ -247,6 +251,7 @@ saves progress; a second Ctrl+C aborts immediately.`,
 	cmd.Flags().BoolVar(&cfg.Serving, "serving", cfg.Serving, "Serving-node mode: update only <prefix>.cki and <prefix>.ckm, deferring .ckd-dependent work to the next refresh (auto-detected when <prefix>.ckd is absent)")
 	cmd.Flags().IntVar(&cfg.GoMaxProcs, "gomaxprocs", cfg.GoMaxProcs, "Go scheduler CPU parallelism (defaults to runtime auto-detect)")
 	cmd.Flags().IntVar(&cfg.DecodeWorkers, "decode-workers", cfg.DecodeWorkers, "Parallel fingerprint decode workers (defaults to GOMAXPROCS)")
+	cmd.Flags().StringVar(&cfg.BaseURL, "archive-url", cfg.BaseURL, "Base URL for the AcoustID archive; a mirror serving the same index.json layout works, including a blob container URL with a SAS query string")
 	cmd.Flags().IntVar(&cfg.DownloadWorkers, "download-workers", cfg.DownloadWorkers, "Background archive download workers")
 
 	return cmd
@@ -307,6 +312,7 @@ where it left off.`,
 	cmd.Flags().StringVar(&cfg.CacheDir, "cache-dir", cfg.CacheDir, "Directory for downloaded archive files (defaults to a cache directory beside --dataset)")
 	cmd.Flags().IntVar(&cfg.GoMaxProcs, "gomaxprocs", cfg.GoMaxProcs, "Go scheduler CPU parallelism (defaults to runtime auto-detect)")
 	cmd.Flags().IntVar(&cfg.DecodeWorkers, "decode-workers", cfg.DecodeWorkers, "Parallel fingerprint decode workers (defaults to GOMAXPROCS)")
+	cmd.Flags().StringVar(&cfg.BaseURL, "archive-url", cfg.BaseURL, "Base URL for the AcoustID archive; a mirror serving the same index.json layout works, including a blob container URL with a SAS query string")
 	cmd.Flags().IntVar(&cfg.DownloadWorkers, "download-workers", cfg.DownloadWorkers, "Background archive download workers")
 
 	return cmd
@@ -377,6 +383,7 @@ func newBackfillMetadataCmd() *cobra.Command {
 	cmd.Flags().IntVar(&cfg.DecodeWorkers, "decode-workers", cfg.DecodeWorkers, "Parallel metadata decode workers (defaults to GOMAXPROCS)")
 	cmd.Flags().IntVar(&cfg.StartYear, "start-year", cfg.StartYear, "Replay archive from this year (defaults to earliest available)")
 	cmd.Flags().StringVar(&cfg.EndDate, "end-date", cfg.EndDate, "Replay archive through this date (YYYY-MM-DD, defaults to latest available)")
+	cmd.Flags().StringVar(&cfg.BaseURL, "archive-url", cfg.BaseURL, "Base URL for the AcoustID archive; a mirror serving the same index.json layout works, including a blob container URL with a SAS query string")
 	cmd.Flags().IntVar(&cfg.DownloadWorkers, "download-workers", cfg.DownloadWorkers, "Background archive download workers")
 	cmd.Flags().Int64Var(&cfg.SoftHeapLimit, "soft-heap-limit", cfg.SoftHeapLimit, "SQLite soft heap limit in bytes; use 0 to disable, negative to leave unchanged")
 	_ = cmd.Flags().MarkHidden("start-year")
